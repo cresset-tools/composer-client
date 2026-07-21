@@ -1,0 +1,42 @@
+[package]
+name = "composer-autoload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generate Composer-compatible vendor/composer/autoload_*.php from a resolved dependency tree — byte-equivalent to `composer dump-autoload`, without running PHP."
+readme = "README.md"
+homepage = "https://github.com/cresset-tools/composer-client"
+documentation = "https://docs.rs/composer-autoload"
+keywords = ["composer", "autoload", "autoloader", "php", "classmap"]
+categories = ["development-tools", "filesystem"]
+# Keep ~3 MB of test fixtures out of the published crate; they exist only for
+# this repo's CI and are useless to a registry consumer. `benches/` stays (a
+# declared [[bench]] target); `vendored/` stays (the pinned Composer runtime
+# files this crate emits).
+exclude = ["/tests"]
+
+[dependencies]
+composer-installers = { workspace = true }
+composer-php-json = { workspace = true }
+composer-semver = { workspace = true }
+md-5 = { workspace = true }
+memchr = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "scan"
+harness = false
+
+[lints]
+workspace = true

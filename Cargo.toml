@@ -13,7 +13,7 @@
 # `dump-autoload`) and `composer-install` (the install-from-lock primitive)
 # are the expected next ones.
 resolver = "3"
-members = ["crates/composer-installers"]
+members = ["crates/composer-installers", "crates/composer-autoload"]
 
 [workspace.package]
 version = "0.1.0" # x-release-please-version
@@ -30,12 +30,32 @@ repository = "https://github.com/cresset-tools/composer-client"
 # of them in lockstep with `[workspace.package].version`.
 [workspace.dependencies]
 composer-installers = { path = "crates/composer-installers", version = "0.1.0" } # x-release-please-version
+composer-autoload = { path = "crates/composer-autoload", version = "0.1.0" } # x-release-please-version
+
+# Shared Composer-domain crates from composer-rs (crates.io). Pinned to match
+# bougie so composer-autoload stays byte-equivalent to what bougie ships.
+composer-php-json = "0.1"
+composer-semver = "0.1.0"
 
 # Shared external deps.
 eyre = "0.6"
+md-5 = "0.11"
+memchr = "2"
+rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3.10"
+tracing = "0.1"
+walkdir = "2.5"
+regex = { version = "1.11", default-features = false, features = [
+    "std",
+    "perf",
+    "unicode-perl",
+    "unicode-case",
+] }
+criterion = { version = "0.5", default-features = false, features = [
+    "cargo_bench_support",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -46,6 +66,18 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
+# Tolerated on the byte-exact Composer-faithful ports: composer-autoload mirrors
+# Composer's ClassLoader shape (many-bool flag structs, long emit functions),
+# so satisfying these pedantic lints would reduce fidelity to upstream. Kept as
+# allow rather than refactored.
+doc_markdown = "allow"
+elidable_lifetime_names = "allow"
+map_unwrap_or = "allow"
+needless_pass_by_value = "allow"
+ptr_arg = "allow"
+struct_excessive_bools = "allow"
+struct_field_names = "allow"
+too_many_lines = "allow"
 
 [profile.release]
 # Smaller, faster, no panic-unwinder — mirrors the family default.
