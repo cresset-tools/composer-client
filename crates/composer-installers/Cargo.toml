@@ -1,0 +1,24 @@
+[package]
+name = "composer-installers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native reimplementation of declarative Composer install plugins — composer/installers (package-type to install-path routing), magento/magento-composer-installer (extra.map copy + chmod + vendor_path.php), and Laravel post-autoload-dump discovery. Reproduces their on-disk effect without running PHP."
+readme = "README.md"
+homepage = "https://github.com/cresset-tools/composer-client"
+documentation = "https://docs.rs/composer-installers"
+keywords = ["composer", "installers", "magento", "php", "vendor"]
+categories = ["development-tools", "filesystem"]
+
+[dependencies]
+eyre = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

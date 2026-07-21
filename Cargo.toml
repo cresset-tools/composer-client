@@ -1,0 +1,56 @@
+[workspace]
+# Client-side Composer behavior for the cresset-tools family — the layer
+# ABOVE composer-rs's protocol contract. composer-rs models the Composer
+# *contract* (version algebra, wire format, PHP-JSON encoding — defined by
+# Composer's spec, shared by clients AND servers). This workspace holds the
+# client *behavior* that more than one client needs: `bougie` (the package
+# manager) and `magebuild` (the build orchestrator) — declarative install
+# plugins, autoload generation, and install-from-lock. A repository server
+# (sconce) never dumps an autoloader or installs to paths, so these stay out
+# of composer-rs by its own contract-vs-behavior boundary.
+#
+# `composer-installers` is the first tenant; `composer-autoload` (byte-equiv
+# `dump-autoload`) and `composer-install` (the install-from-lock primitive)
+# are the expected next ones.
+resolver = "3"
+members = ["crates/composer-installers"]
+
+[workspace.package]
+version = "0.1.0" # x-release-please-version
+edition = "2024"
+rust-version = "1.95"
+license = "EUPL-1.2"
+authors = ["Jelle Besseling <jelle@pingiun.com>"]
+repository = "https://github.com/cresset-tools/composer-client"
+
+# Intra-workspace deps centralized so members reference them with
+# `{ workspace = true }`. Each carries both `path` (local builds) and a
+# `version` (crates.io publish — cargo rejects a published crate whose deps
+# lack a version). The trailing release-please marker lets the tool rewrite all
+# of them in lockstep with `[workspace.package].version`.
+[workspace.dependencies]
+composer-installers = { path = "crates/composer-installers", version = "0.1.0" } # x-release-please-version
+
+# Shared external deps.
+eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3.10"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+# Smaller, faster, no panic-unwinder — mirrors the family default.
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = "symbols"

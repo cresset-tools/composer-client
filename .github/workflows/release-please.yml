@@ -1,0 +1,85 @@
+name: release-please
+
+# Conventional-commit-driven release automation. On every push to main,
+# release-please scans commits since the last `composer-client-v*` tag and
+# opens or updates a release PR that bumps `workspace.package.version` (and the
+# `# x-release-please-version`-annotated dep pins in Cargo.toml) and prepends to
+# CHANGELOG. Merging that PR makes release-please publish the
+# `composer-client-v<version>` GitHub Release (which creates the git tag), and
+# the `release: published` event triggers `crates-publish.yml` to publish to
+# crates.io via Trusted Publishing.
+#
+# release-please decides "what changed" purely from conventional-commit
+# messages, not per-crate file diffs — so every workspace member is released in
+# lockstep on `workspace.package.version` (the same model as the sibling
+# `composer-rs`, `bougie`, and `sconce` repos).
+#
+# release-please owns the WHOLE release: it creates the tag and publishes a
+# real (non-draft) GitHub Release itself. Publishing a non-draft release
+# creates the tag *within* the same action step, before the next candidate PR
+# is computed, so the baseline is always anchored and release-please won't
+# rescan history and propose a spurious major bump.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Don't cancel in-flight runs — a half-written release PR is worse than
+# waiting for the previous run to finish.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # GitHub-App token (not `GITHUB_TOKEN`) so the release PR is authored by
+      # an actor that *can* trigger downstream workflows — PRs opened with
+      # `GITHUB_TOKEN` are silenced by GitHub's anti-recursion rule and
+      # `ci.yml` would never run on them. The same applies to the release
+      # publish: a `release: published` event from `GITHUB_TOKEN` wouldn't
+      # trigger `crates-publish.yml`; minted via the app, it does. The
+      # `cresset-tools-bot` app is installed org-wide; this repo needs the
+      # BOT_APP_ID / BOT_APP_PRIVATE_KEY secrets set (same values as bougie).
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # release-please rewrites `workspace.package.version` but doesn't
+      # understand Cargo.lock. Refresh the lockfile on the PR branch so CI
+      # builds aren't broken by stale [[package]] entries. `--workspace`
+      # scopes the update to workspace members only.
+      - name: Checkout release PR
+        if: ${{ steps.release.outputs.pr }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJson(steps.release.outputs.pr).headBranchName }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Refresh Cargo.lock
+        if: ${{ steps.release.outputs.pr }}
+        run: |
+          cargo update --workspace
+          if ! git diff --quiet Cargo.lock; then
+            git config user.email "${{ vars.BOT_EMAIL || 'noreply@cresset.tools' }}"
+            git config user.name "${{ vars.BOT_NAME || 'cresset-bot' }}"
+            git add Cargo.lock
+            git commit -m "chore(release): refresh Cargo.lock"
+            git push
+          fi
