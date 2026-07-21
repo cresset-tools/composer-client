@@ -1,21 +1,19 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "simple",
-  "include-component-in-tag": true,
+  "release-type": "rust",
   "separator": "-",
+  "include-component-in-tag": true,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
-  "changelog-path": "CHANGELOG.md",
+  "plugins": [
+    "cargo-workspace"
+  ],
   "packages": {
-    ".": {
-      "package-name": "composer-client",
-      "component": "composer-client",
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "Cargo.toml"
-        }
-      ]
+    "crates/composer-installers": {
+      "release-as": "0.1.0"
+    },
+    "crates/composer-autoload": {
+      "release-as": "0.1.0"
     }
   }
 }

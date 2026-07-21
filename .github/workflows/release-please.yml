@@ -1,18 +1,19 @@
 name: release-please
 
 # Conventional-commit-driven release automation. On every push to main,
-# release-please scans commits since the last `composer-client-v*` tag and
-# opens or updates a release PR that bumps `workspace.package.version` (and the
-# `# x-release-please-version`-annotated dep pins in Cargo.toml) and prepends to
-# CHANGELOG. Merging that PR makes release-please publish the
-# `composer-client-v<version>` GitHub Release (which creates the git tag), and
-# the `release: published` event triggers `crates-publish.yml` to publish to
-# crates.io via Trusted Publishing.
+# release-please scans commits since each crate's last `<crate>-v*` tag and
+# opens or updates a release PR that bumps each changed crate's own Cargo.toml
+# version and prepends to its CHANGELOG. Merging that PR makes release-please
+# publish a per-crate `<crate>-v<version>` GitHub Release (which creates the git
+# tag), and the `release: published` event triggers `crates-publish.yml` to
+# publish to crates.io via Trusted Publishing.
 #
-# release-please decides "what changed" purely from conventional-commit
-# messages, not per-crate file diffs — so every workspace member is released in
-# lockstep on `workspace.package.version` (the same model as the sibling
-# `composer-rs`, `bougie`, and `sconce` repos).
+# Crates are versioned INDEPENDENTLY (release-type `rust` + the `cargo-workspace`
+# plugin): only the crate a commit actually touches is bumped, and the plugin
+# updates inter-crate dependency pins when a dependency crate is released — so a
+# stable leaf like composer-installers isn't republished just because
+# composer-autoload changed. (Unlike the lockstep sibling repos composer-rs /
+# bougie / sconce.)
 #
 # release-please owns the WHOLE release: it creates the tag and publishes a
 # real (non-draft) GitHub Release itself. Publishing a non-draft release
@@ -61,10 +62,10 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # release-please rewrites `workspace.package.version` but doesn't
-      # understand Cargo.lock. Refresh the lockfile on the PR branch so CI
-      # builds aren't broken by stale [[package]] entries. `--workspace`
-      # scopes the update to workspace members only.
+      # release-please rewrites the crate versions but doesn't understand
+      # Cargo.lock. Refresh the lockfile on the PR branch so CI builds aren't
+      # broken by stale [[package]] entries. `--workspace` scopes the update to
+      # workspace members only.
       - name: Checkout release PR
         if: ${{ steps.release.outputs.pr }}
         uses: actions/checkout@v7

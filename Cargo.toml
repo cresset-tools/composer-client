@@ -16,22 +16,20 @@ resolver = "3"
 members = ["crates/composer-installers", "crates/composer-autoload"]
 
 [workspace.package]
-version = "0.1.0" # x-release-please-version
+# No shared `version` — crates are versioned INDEPENDENTLY (each crate's
+# Cargo.toml carries its own version; release-please's cargo-workspace plugin
+# bumps them and updates inter-crate pins per crate).
 edition = "2024"
 rust-version = "1.95"
 license = "EUPL-1.2"
 authors = ["Jelle Besseling <jelle@pingiun.com>"]
 repository = "https://github.com/cresset-tools/composer-client"
 
-# Intra-workspace deps centralized so members reference them with
-# `{ workspace = true }`. Each carries both `path` (local builds) and a
-# `version` (crates.io publish — cargo rejects a published crate whose deps
-# lack a version). The trailing release-please marker lets the tool rewrite all
-# of them in lockstep with `[workspace.package].version`.
+# Shared EXTERNAL deps centralized so members reference them with
+# `{ workspace = true }`. Inter-crate deps are deliberately NOT here: each
+# dependent crate declares them directly (`path` + `version`) so release-please's
+# cargo-workspace plugin can bump the pin per crate under independent versioning.
 [workspace.dependencies]
-composer-installers = { path = "crates/composer-installers", version = "0.1.0" } # x-release-please-version
-composer-autoload = { path = "crates/composer-autoload", version = "0.1.0" } # x-release-please-version
-
 # Shared Composer-domain crates from composer-rs (crates.io). Pinned to match
 # bougie so composer-autoload stays byte-equivalent to what bougie ships.
 composer-php-json = "0.1"

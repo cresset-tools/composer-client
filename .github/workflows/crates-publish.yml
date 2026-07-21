@@ -1,8 +1,8 @@
 name: crates-publish
 
 # Publish every workspace crate to crates.io in dependency order, on the
-# `release: published` event that release-please fires when it cuts a
-# `composer-client-v<version>` GitHub Release (and creates the tag).
+# `release: published` event that release-please fires when it cuts a per-crate
+# `<crate>-v<version>` GitHub Release (crates are versioned independently).
 #
 # cargo-workspaces topologically orders the crates, waits for each to appear in
 # the index before publishing its dependents, and SKIPS any crate whose current
@@ -10,9 +10,9 @@ name: crates-publish
 # halfway (flaky network, index lag), just re-run it and it resumes.
 #
 # `--publish-as-is` publishes the versions exactly as committed at the tag.
-# release-please already set `workspace.package.version` and the per-dep version
-# pins (the `# x-release-please-version`-annotated lines in Cargo.toml); we do
-# NOT bump/commit/tag here, only publish.
+# release-please (rust release-type + cargo-workspace plugin) already set each
+# crate's own version and the inter-crate dependency pins; we do NOT
+# bump/commit/tag here, only publish.
 
 on:
   release:
@@ -34,9 +34,11 @@ concurrency:
 
 jobs:
   publish:
-    # release-please only ever cuts `composer-client-v*` releases, but be
-    # explicit so a stray manual release can't trigger a publish.
-    if: startsWith(github.event.release.tag_name, 'composer-client-v')
+    # Per-crate tags are `composer-<name>-v<version>`; match any of them so each
+    # crate's release triggers a publish (cargo-workspaces is idempotent — it
+    # skips crates already on crates.io — so a run per tag is safe). The guard
+    # keeps a stray manual release from triggering a publish.
+    if: ${{ startsWith(github.event.release.tag_name, 'composer-') && contains(github.event.release.tag_name, '-v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
