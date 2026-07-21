@@ -110,11 +110,45 @@ fn missing_composer_json_errors_with_helpful_message() {
 }
 
 #[test]
-fn composer_plugin_package_warns_and_is_skipped() {
+fn composer_plugin_package_warns_but_installs_files() {
+    // A `type: composer-plugin` package installs like any other — Composer
+    // extracts its files too (some, e.g. `php-http/discovery`, provide runtime
+    // code). Only its install-time *hooks* are skipped (this installer never
+    // runs plugin PHP), surfaced as a warning.
+    use std::io::Write as _;
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     let tmp = TempDir::new().unwrap();
     let cache_root = cache_in(tmp.path());
     let proj = tmp.path().join("p");
     std::fs::create_dir_all(&proj).unwrap();
+
+    let mut zip_body: Vec<u8> = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_body));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("acme-plugin/composer.json", opts).unwrap();
+        zw.write_all(br#"{"name":"acme/plugin","type":"composer-plugin"}"#)
+            .unwrap();
+        zw.finish().unwrap();
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (uri, _server) = rt.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/p.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(zip_body))
+            .mount(&server)
+            .await;
+        (server.uri(), server)
+    });
+
     let hash = hash_for(MINIMAL_COMPOSER_JSON);
     let lock = format!(
         r#"{{
@@ -126,8 +160,8 @@ fn composer_plugin_package_warns_and_is_skipped() {
                     "type": "composer-plugin",
                     "dist": {{
                         "type": "zip",
-                        "url": "https://example/p.zip",
-                        "shasum": "1111111111111111111111111111111111111111"
+                        "url": "{uri}/p.zip",
+                        "shasum": ""
                     }}
                 }}
             ],
@@ -137,17 +171,21 @@ fn composer_plugin_package_warns_and_is_skipped() {
     write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
 
     let summary = run(&cache_root, &proj, InstallOptions::default(), None)
-        .expect("install must succeed; the plugin is skipped, not rejected");
-    assert_eq!(summary.packages_installed, 0);
-    assert_eq!(summary.packages_skipped_plugin, 1);
-    assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
-    let warning = &summary.warnings[0];
-    assert!(warning.contains("acme/plugin"), "{warning}");
-    assert!(warning.contains("Composer plugin"), "{warning}");
+        .expect("install must succeed; the plugin installs, only its hook is skipped");
+    // Files ARE installed (Composer installs plugin packages too)…
+    assert_eq!(summary.packages_installed, 1);
     assert!(
-        !proj.join("vendor/acme/plugin").exists(),
-        "plugin must not be extracted",
+        proj.join("vendor/acme/plugin/composer.json").is_file(),
+        "plugin files must be extracted into vendor/",
     );
+    // …but the install-time hook is not run, surfaced as a warning.
+    assert_eq!(summary.plugin_hooks_skipped, 1);
+    let warning = summary
+        .warnings
+        .iter()
+        .find(|w| w.contains("acme/plugin"))
+        .unwrap_or_else(|| panic!("expected a plugin warning, got {:?}", summary.warnings));
+    assert!(warning.contains("Composer plugin"), "{warning}");
 }
 
 #[test]
@@ -336,7 +374,7 @@ fn no_dev_hides_dev_only_packages_from_preflight() {
         .expect("preflight should pass with --no-dev");
     assert_eq!(summary.packages_installed, 0);
     assert_eq!(summary.packages_already_present, 0);
-    assert_eq!(summary.packages_skipped_plugin, 0);
+    assert_eq!(summary.plugin_hooks_skipped, 0);
     assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
     assert!(summary.no_dev);
 }

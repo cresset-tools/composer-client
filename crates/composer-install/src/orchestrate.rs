@@ -102,10 +102,12 @@ pub struct InstallSummary {
     /// directory already existed — skipped entirely (no download, no
     /// extraction).
     pub packages_up_to_date: u32,
-    /// Composer-plugin packages skipped over (their zip was not extracted
-    /// because this installer won't run plugin install-time PHP and the
-    /// extracted tree would be inert).
-    pub packages_skipped_plugin: u32,
+    /// Composer-plugin packages installed like any other package (Composer
+    /// installs them too), but whose install-time hooks are NOT run — this
+    /// installer never executes plugin PHP. Their files ARE extracted, so
+    /// packages that happen to be `type: composer-plugin` yet provide
+    /// runtime code (e.g. `php-http/discovery`) are not left missing.
+    pub plugin_hooks_skipped: u32,
     /// Packages that were in the previous `installed.json` but are no longer in
     /// the lock file (or excluded by `--no-dev`) and had their vendor directory
     /// removed.
@@ -215,16 +217,17 @@ pub fn install_from_lock_with_patches(
 
     // Gather the packages actually installed. Filters:
     //   - `path` dists: materialized separately (symlink-or-copy).
-    //   - composer-plugin packages: preflight warned; their zip is not
-    //     extracted because the plugin's install-time hook is never run and
-    //     the extracted tree would be inert.
     //   - metapackages: no `dist` and no code — pure require-graph nodes.
+    // Composer-plugin packages install like any other package (Composer does
+    // too — their files may provide runtime code); only their install-time
+    // hooks are skipped, since this installer never runs plugin PHP. Preflight
+    // warns about them.
     let candidates: Vec<&LockPackage> = if opts.no_dev {
         lock.packages.iter().collect()
     } else {
         lock.all_packages().collect()
     };
-    let packages_skipped_plugin =
+    let plugin_hooks_skipped =
         u32::try_from(candidates.iter().filter(|p| p.is_composer_plugin()).count())
             .unwrap_or(u32::MAX);
 
@@ -261,7 +264,7 @@ pub fn install_from_lock_with_patches(
     let installable: Vec<&LockPackage> = candidates
         .iter()
         .copied()
-        .filter(|p| !p.is_path_dist() && !p.is_composer_plugin() && !p.is_metapackage())
+        .filter(|p| !p.is_path_dist() && !p.is_metapackage())
         .collect();
 
     // Path packages are materialized separately (symlink-or-copy), not
@@ -529,7 +532,7 @@ pub fn install_from_lock_with_patches(
         packages_installed,
         packages_already_present,
         packages_up_to_date,
-        packages_skipped_plugin,
+        plugin_hooks_skipped,
         packages_removed,
         bins_installed: bin_summary.bins_installed,
         files_deployed: deploy_summary.files_deployed,
