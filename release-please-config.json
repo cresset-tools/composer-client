@@ -11,8 +11,14 @@
   "packages": {
     "crates/composer-installers": {},
     "crates/composer-autoload": {},
-    "crates/composer-patches": {},
-    "crates/composer-manifest": {},
-    "crates/composer-install": {}
+    "crates/composer-patches": {
+      "release-as": "0.1.0"
+    },
+    "crates/composer-manifest": {
+      "release-as": "0.1.0"
+    },
+    "crates/composer-install": {
+      "release-as": "0.1.0"
+    }
   }
 }
