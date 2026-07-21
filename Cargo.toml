@@ -9,15 +9,16 @@
 # (sconce) never dumps an autoloader or installs to paths, so these stay out
 # of composer-rs by its own contract-vs-behavior boundary.
 #
-# `composer-installers` is the first tenant; `composer-autoload` (byte-equiv
-# `dump-autoload`) and `composer-install` (the install-from-lock primitive)
-# are the expected next ones.
+# `composer-installers` was the first tenant; `composer-autoload` (byte-equiv
+# `dump-autoload`), `composer-patches`, `composer-manifest`, and
+# `composer-install` (the install-from-lock primitive) followed.
 resolver = "3"
 members = [
     "crates/composer-installers",
     "crates/composer-autoload",
     "crates/composer-patches",
     "crates/composer-manifest",
+    "crates/composer-install",
 ]
 
 [workspace.package]
@@ -64,6 +65,25 @@ criterion = { version = "0.5", default-features = false, features = [
     "cargo_bench_support",
 ] }
 
+# `composer-install` deps: the HTTP dist downloader + archive extraction.
+# `rustls` keeps the default `Fetcher` free of a system-OpenSSL build dep;
+# `gzip` handles transfer-encoded responses; `blocking` matches the sync core.
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "rustls",
+    "gzip",
+] }
+# Composer dist archives are zip; `deflate` is the only codec Packagist emits.
+zip = { version = "8.0", default-features = false, features = ["deflate"] }
+# Composer's dist `shasum` field is legacy sha1.
+sha1 = "0.10"
+# HTTP Basic credential encoding for the auth headers.
+base64 = "0.22"
+# Dev-only: mock HTTP server + a current-thread runtime to drive it from the
+# blocking downloader tests.
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt", "macros"] }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
@@ -85,6 +105,12 @@ ptr_arg = "allow"
 struct_excessive_bools = "allow"
 struct_field_names = "allow"
 too_many_lines = "allow"
+# composer-install: the bin-proxy PHP emitter builds its output line-by-line (a
+# faithful mirror of Composer's BinaryInstaller `vendor/bin` proxy), which trips
+# `vec_init_then_push`; `similar_names` fires on the `pkg1`/`pkg2` test
+# fixtures. Both are noise on these ports, not bugs.
+similar_names = "allow"
+vec_init_then_push = "allow"
 
 [profile.release]
 # Smaller, faster, no panic-unwinder — mirrors the family default.

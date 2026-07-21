@@ -1,0 +1,52 @@
+[package]
+name = "composer-install"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Install a resolved composer.lock into a project: download + verify + extract dists in parallel, materialize path packages, apply patches, run the declarative install plugins, dump the autoloader, and link vendor/bin — without running PHP. The pubgrub solver is out of scope; this is the install-from-lock half."
+readme = "README.md"
+homepage = "https://github.com/cresset-tools/composer-client"
+documentation = "https://docs.rs/composer-install"
+keywords = ["composer", "install", "vendor", "php", "downloader"]
+categories = ["development-tools", "filesystem"]
+# Test fixtures are CI-only; keep them out of the published crate.
+exclude = ["/tests"]
+
+[dependencies]
+# Inter-crate deps declared directly (not workspace-inherited) so
+# release-please's cargo-workspace plugin bumps each pin when the dependency
+# is released. Mirrors how composer-autoload depends on composer-installers.
+composer-manifest = { path = "../composer-manifest", version = "0.1.0" }
+composer-installers = { path = "../composer-installers", version = "0.1.0" }
+composer-autoload = { path = "../composer-autoload", version = "0.1.0" }
+composer-patches = { path = "../composer-patches", version = "0.1.0" }
+
+base64 = { workspace = true }
+eyre = { workspace = true }
+rayon = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+tracing = { workspace = true }
+zip = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Path-repository materialization installs `type: path` packages as NTFS
+# junctions (not symlinks) because junctions need no elevated privilege;
+# `junction` wraps the reparse-point FFI so this crate stays `unsafe_code = "deny"`.
+junction = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true }
+zip = { workspace = true }
+sha1 = { workspace = true }
+reqwest = { workspace = true }
+
+[lints]
+workspace = true
