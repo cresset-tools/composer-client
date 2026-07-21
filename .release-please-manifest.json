@@ -1,4 +1,4 @@
 {
-  "crates/composer-installers": "0.0.0",
-  "crates/composer-autoload": "0.0.0"
+  "crates/composer-installers": "0.1.0",
+  "crates/composer-autoload": "0.1.0"
 }
