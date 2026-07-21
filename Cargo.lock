@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "composer-install"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "composer-autoload",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "composer-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "composer-php-json",
  "composer-semver",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "composer-patches"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eyre",
  "flickzeug",
