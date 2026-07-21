@@ -136,6 +136,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "composer-manifest"
+version = "0.1.0"
+dependencies = [
+ "composer-php-json",
+ "composer-semver",
+ "composer-wire",
+ "eyre",
+ "md-5",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "composer-patches"
 version = "0.1.0"
 dependencies = [
@@ -164,6 +178,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19468a4e1f2390fef462b7f723b1625f052b9a0dbf67d00b6494d496cd338b4a"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "composer-wire"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc3c59104a94b76561a4f44a4bc48d18770d6b265c75b447ff56079de9b5f9a7"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

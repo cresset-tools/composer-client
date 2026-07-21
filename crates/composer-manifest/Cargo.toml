@@ -1,0 +1,27 @@
+[package]
+name = "composer-manifest"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Composer data model: typed composer.json / composer.lock IO + editing and Packagist v2 metadata expansion — the native (no-PHP) Composer file formats."
+readme = "README.md"
+homepage = "https://github.com/cresset-tools/composer-client"
+documentation = "https://docs.rs/composer-manifest"
+keywords = ["composer", "lockfile", "packagist", "php", "manifest"]
+categories = ["development-tools", "parser-implementations"]
+
+[dependencies]
+composer-php-json = { workspace = true }
+composer-semver = { workspace = true }
+composer-wire = { workspace = true }
+eyre = { workspace = true }
+md-5 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

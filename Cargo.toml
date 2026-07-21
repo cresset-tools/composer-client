@@ -17,6 +17,7 @@ members = [
     "crates/composer-installers",
     "crates/composer-autoload",
     "crates/composer-patches",
+    "crates/composer-manifest",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ repository = "https://github.com/cresset-tools/composer-client"
 # bougie so composer-autoload stays byte-equivalent to what bougie ships.
 composer-php-json = "0.1"
 composer-semver = "0.1.0"
+composer-wire = "0.1"
 
 # Shared external deps.
 eyre = "0.6"
