@@ -1,0 +1,35 @@
+[package]
+name = "composer-patches"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native reimplementation of cweagans/composer-patches: resolve, download, and apply patch files to installed packages during install — no PHP plugin execution. FS/PHP-agnostic core; patches applied in-process via the flickzeug fuzzy-matching diff library, never by shelling out to git/patch."
+readme = "README.md"
+homepage = "https://github.com/cresset-tools/composer-client"
+documentation = "https://docs.rs/composer-patches"
+keywords = ["composer", "patches", "cweagans", "php", "diff"]
+categories = ["development-tools"]
+
+[dependencies]
+eyre = { workspace = true }
+# Pure-Rust unified/git-diff parsing + fuzzy hunk application (a fork of diffy
+# with GNU-patch-style fuzzy matching). Multi-file aware (`Patch = Vec<Diff>`),
+# so it owns the split + header parsing; this crate owns `-p` strip, file
+# routing, and on-disk I/O.
+flickzeug = { workspace = true }
+# Unified/git-diff *generation* (the inverse of flickzeug's apply): the
+# de-facto Myers/Patience diff crate.
+similar = { workspace = true }
+# Content fingerprints for the re-application invariant (patches.lock.json).
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Atomic writes (temp file + rename) so a crash mid-apply never leaves a
+# truncated source file; also used in tests for scratch trees.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

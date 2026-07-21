@@ -13,7 +13,11 @@
 # `dump-autoload`) and `composer-install` (the install-from-lock primitive)
 # are the expected next ones.
 resolver = "3"
-members = ["crates/composer-installers", "crates/composer-autoload"]
+members = [
+    "crates/composer-installers",
+    "crates/composer-autoload",
+    "crates/composer-patches",
+]
 
 [workspace.package]
 # No shared `version` — crates are versioned INDEPENDENTLY (each crate's
@@ -37,9 +41,12 @@ composer-semver = "0.1.0"
 
 # Shared external deps.
 eyre = "0.6"
+flickzeug = "0.5.1"
 md-5 = "0.11"
 memchr = "2"
 rayon = "1.10"
+sha2 = "0.11"
+similar = "2.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3.10"
