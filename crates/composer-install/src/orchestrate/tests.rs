@@ -370,8 +370,16 @@ fn no_dev_hides_dev_only_packages_from_preflight() {
     );
     write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
 
-    let summary = run(&cache_root, &proj, InstallOptions { no_dev: true }, None)
-        .expect("preflight should pass with --no-dev");
+    let summary = run(
+        &cache_root,
+        &proj,
+        InstallOptions {
+            no_dev: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("preflight should pass with --no-dev");
     assert_eq!(summary.packages_installed, 0);
     assert_eq!(summary.packages_already_present, 0);
     assert_eq!(summary.plugin_hooks_skipped, 0);

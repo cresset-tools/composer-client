@@ -60,6 +60,25 @@ impl std::fmt::Debug for InstallEnv<'_> {
     }
 }
 
+/// How a dist's files are materialized into `vendor/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkMode {
+    /// Decompress each cached `<key>.zip` straight into `vendor/` on every
+    /// install (the portable default; independent trees, safe to mutate).
+    #[default]
+    Extract,
+    /// Decompress each dist ONCE into a persistent extracted store next to the
+    /// zip cache, then **hard-link** the store tree into `vendor/`. Skips the
+    /// per-install decompression and file writes when the store is warm.
+    ///
+    /// Safe to mutate `vendor/` afterwards **only** because every writer in this
+    /// installer (and `composer-patches`) replaces a file atomically — a temp
+    /// file in the same dir plus a rename — which drops the hard link and gives
+    /// the touched file a fresh inode, leaving the shared store intact. An
+    /// in-place-truncating writer would corrupt the store for the next install.
+    Hardlink,
+}
+
 /// Caller-supplied install options. Mirrors the subset of Composer's `install`
 /// flags this installer honors.
 #[derive(Debug, Clone, Copy, Default)]
@@ -68,6 +87,9 @@ pub struct InstallOptions {
     /// `no_dev=true` to the autoloader so dev autoload entries don't reach
     /// `vendor/autoload.php`.
     pub no_dev: bool,
+    /// How dist files land in `vendor/` (see [`LinkMode`]). Defaults to
+    /// [`LinkMode::Extract`].
+    pub link_mode: LinkMode,
 }
 
 /// Lifecycle hooks fired during an install when root-script execution is opted
@@ -392,7 +414,13 @@ pub fn install_from_lock_with_patches(
         })
         .collect();
 
-    let outcomes = fetch_and_extract_dists(env.fetcher, env.cache_root, &dists, env.progress)?;
+    let outcomes = fetch_and_extract_dists(
+        env.fetcher,
+        env.cache_root,
+        &dists,
+        env.progress,
+        opts.link_mode,
+    )?;
 
     // Materialize `type: path` packages (symlink-or-copy) into their vendor
     // destinations. Done before the autoload dump so the generated autoloader

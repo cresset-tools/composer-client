@@ -94,7 +94,14 @@ fn downloads_single_zip_and_extracts_with_strip_prefix() {
         fallbacks: &[],
     }];
 
-    fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
 
     assert!(vendor_dest.join("composer.json").is_file());
     assert!(vendor_dest.join("src/Foo.php").is_file());
@@ -153,7 +160,14 @@ fn falls_back_to_next_candidate_when_primary_url_fails() {
         fallbacks: &fallbacks,
     }];
 
-    let outcomes = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    let outcomes = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(
         matches!(outcomes[0], DistOutcome::Downloaded { bytes } if bytes > 0),
@@ -200,8 +214,14 @@ fn all_candidates_failing_surfaces_candidate_count() {
         fallbacks: &fallbacks,
     }];
 
-    let err = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect_err("every candidate 404s");
+    let err = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect_err("every candidate 404s");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("all 2 candidate URLs failed"),
@@ -251,7 +271,14 @@ fn cache_hit_short_circuits_network() {
         fallbacks: &[],
     }];
 
-    let outcomes = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    let outcomes = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
     assert_eq!(outcomes, vec![DistOutcome::CacheHit]);
     assert!(vendor_dest.join("composer.json").is_file());
 }
@@ -293,8 +320,14 @@ fn hash_mismatch_aborts_install_cleanly() {
         fallbacks: &[],
     }];
 
-    let err = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect_err("hash mismatch must error");
+    let err = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect_err("hash mismatch must error");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("sha1") || msg.contains("hash"),
@@ -364,7 +397,14 @@ fn parallel_four_dists_share_one_run() {
         })
         .collect();
 
-    fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
 
     for dest in &dests {
         assert!(dest.join("composer.json").is_file());
@@ -408,7 +448,14 @@ fn extract_strips_top_level_directory_via_auto_detect() {
         project_root: tmp.path(),
         fallbacks: &[],
     }];
-    let outcomes = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    let outcomes = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(
         matches!(outcomes[0], DistOutcome::Downloaded { bytes } if bytes > 0),
@@ -472,8 +519,14 @@ fn dist_request_auth_header_is_sent_on_get() {
         fallbacks: &[],
     }];
 
-    fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect("download must succeed when the Authorization header matches");
+    fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect("download must succeed when the Authorization header matches");
     assert!(vendor_dest.join("composer.json").is_file());
 }
 
@@ -517,8 +570,14 @@ fn dist_request_without_auth_fails_when_server_requires_it() {
         fallbacks: &[],
     }];
 
-    let err = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect_err("unauthenticated request must fail");
+    let err = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect_err("unauthenticated request must fail");
     let msg = format!("{err:#}");
     assert!(msg.contains("401"), "{msg}");
 }
@@ -595,7 +654,14 @@ fn local_artifact_dist_is_copied_and_extracted() {
         fallbacks: &[],
     }];
 
-    fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress).unwrap();
+    fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .unwrap();
 
     assert!(vendor_dest.join("composer.json").is_file());
     assert!(vendor_dest.join("src/Foo.php").is_file());
@@ -626,8 +692,14 @@ fn local_artifact_dist_missing_file_errors_clearly() {
         fallbacks: &[],
     }];
 
-    let err = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect_err("missing artifact must surface as an error");
+    let err = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect_err("missing artifact must surface as an error");
     let msg = format!("{err:#}");
     assert!(msg.contains("type: artifact"), "{msg}");
     assert!(msg.contains("does-not-exist.zip"), "{msg}");
@@ -658,8 +730,14 @@ fn local_artifact_dist_sha1_mismatch_errors() {
         fallbacks: &[],
     }];
 
-    let err = fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress)
-        .expect_err("sha1 mismatch must surface");
+    let err = fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &NoProgress,
+        LinkMode::Extract,
+    )
+    .expect_err("sha1 mismatch must surface");
     let msg = format!("{err:#}");
     assert!(msg.contains("sha1 mismatch"), "{msg}");
 }
@@ -729,4 +807,192 @@ fn cache_key_distinguishes_dists_without_shasum_or_reference() {
         cache_path_for(cache_root, &hashed),
         cache_root.join("abc123def456.zip")
     );
+}
+
+// ---- LinkMode::Hardlink (extracted store) ----
+
+/// Seed `<cache>/<key>.zip` with a fixture whose entries live under `top/`, and
+/// return a store-mode DistRequest keyed on `key` (sha1 verbatim).
+fn seed_zip(cache: &Path, key: &str, top: &str) {
+    std::fs::write(cache.join(format!("{key}.zip")), build_fixture_zip(top)).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn hardlink_store_shares_inodes_and_writes_marker() {
+    use std::os::unix::fs::MetadataExt as _;
+    let tmp = TempDir::new().unwrap();
+    let cache = cache_in(tmp.path());
+    let vendor = tmp.path().join("vendor").join("acme").join("foo");
+    let top = "acme-foo-abc1234";
+    let key = "deadbeefcafe";
+    seed_zip(&cache, key, top);
+    let dist = DistRequest {
+        package_name: "acme/foo",
+        url: "",
+        sha1: key,
+        reference: "",
+        strip_prefix: Some(top),
+        vendor_dest: &vendor,
+        auth_header: None,
+        auth_header_name: None,
+        project_root: tmp.path(),
+        fallbacks: &[],
+    };
+
+    install_from_store(&cache, &dist).unwrap();
+
+    let store = cache.join("extracted").join(key);
+    assert!(store.join("composer.json").is_file());
+    assert!(store.join("src/Foo.php").is_file());
+    assert!(
+        cache
+            .join("extracted")
+            .join(format!("{key}.complete"))
+            .is_file(),
+        "a complete extraction must write its marker"
+    );
+    assert!(vendor.join("composer.json").is_file());
+    assert!(vendor.join("src/Foo.php").is_file());
+
+    let store_ino = std::fs::metadata(store.join("src/Foo.php")).unwrap().ino();
+    let vendor_ino = std::fs::metadata(vendor.join("src/Foo.php")).unwrap().ino();
+    assert_eq!(
+        store_ino, vendor_ino,
+        "vendor file should hard-link the store file"
+    );
+
+    // A second install (marker present) still materializes vendor without
+    // re-extracting — and still shares inodes.
+    let _ = std::fs::remove_dir_all(&vendor);
+    install_from_store(&cache, &dist).unwrap();
+    assert_eq!(
+        std::fs::metadata(store.join("src/Foo.php")).unwrap().ino(),
+        std::fs::metadata(vendor.join("src/Foo.php")).unwrap().ino(),
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn atomic_rewrite_breaks_only_the_patched_file() {
+    use std::os::unix::fs::MetadataExt as _;
+    let tmp = TempDir::new().unwrap();
+    let cache = cache_in(tmp.path());
+    let vendor = tmp.path().join("vendor").join("acme").join("foo");
+    let top = "acme-foo-abc1234";
+    let key = "feedface0001";
+    seed_zip(&cache, key, top);
+    let dist = DistRequest {
+        package_name: "acme/foo",
+        url: "",
+        sha1: key,
+        reference: "",
+        strip_prefix: Some(top),
+        vendor_dest: &vendor,
+        auth_header: None,
+        auth_header_name: None,
+        project_root: tmp.path(),
+        fallbacks: &[],
+    };
+    install_from_store(&cache, &dist).unwrap();
+    let store = cache.join("extracted").join(key);
+
+    // Mimic the patcher: temp file in the same dir + rename over the target.
+    let target = vendor.join("src/Foo.php");
+    let tmpf = vendor.join("src/.Foo.php.patch");
+    std::fs::write(&tmpf, b"<?php class Foo { public $patched = true; }\n").unwrap();
+    std::fs::rename(&tmpf, &target).unwrap();
+
+    // The store's copy is untouched...
+    assert_eq!(
+        std::fs::read_to_string(store.join("src/Foo.php")).unwrap(),
+        "<?php class Foo {}\n",
+        "the shared store must not see the patch",
+    );
+    // ...the patched file now has its own inode...
+    assert_ne!(
+        std::fs::metadata(&target).unwrap().ino(),
+        std::fs::metadata(store.join("src/Foo.php")).unwrap().ino(),
+    );
+    // ...and every un-patched file still shares with the store.
+    assert_eq!(
+        std::fs::metadata(vendor.join("composer.json"))
+            .unwrap()
+            .ino(),
+        std::fs::metadata(store.join("composer.json"))
+            .unwrap()
+            .ino(),
+    );
+}
+
+#[test]
+fn store_without_marker_is_reextracted() {
+    let tmp = TempDir::new().unwrap();
+    let cache = cache_in(tmp.path());
+    let vendor = tmp.path().join("vendor").join("acme").join("foo");
+    let top = "acme-foo-abc1234";
+    let key = "0badc0de0002";
+    seed_zip(&cache, key, top);
+    let dist = DistRequest {
+        package_name: "acme/foo",
+        url: "",
+        sha1: key,
+        reference: "",
+        strip_prefix: Some(top),
+        vendor_dest: &vendor,
+        auth_header: None,
+        auth_header_name: None,
+        project_root: tmp.path(),
+        fallbacks: &[],
+    };
+
+    // A store dir left over from a crashed run — present, but no marker, and
+    // holding stale junk. It must be wiped and re-extracted, not trusted.
+    let store = cache.join("extracted").join(key);
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("STALE"), b"junk").unwrap();
+
+    install_from_store(&cache, &dist).unwrap();
+
+    assert!(store.join("composer.json").is_file());
+    assert!(
+        !store.join("STALE").exists(),
+        "a marker-less store must be re-extracted clean"
+    );
+    assert!(
+        cache
+            .join("extracted")
+            .join(format!("{key}.complete"))
+            .is_file()
+    );
+    assert!(vendor.join("composer.json").is_file());
+}
+
+#[test]
+fn copy_fallback_reproduces_the_tree() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("nested")).unwrap();
+    std::fs::write(src.join("a.txt"), b"aaa").unwrap();
+    std::fs::write(src.join("nested/b.txt"), b"bbb").unwrap();
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // can_link = false forces the copy path (the EXDEV / no-hard-link fallback).
+    link_tree_inner(&src, &dst, false).unwrap();
+
+    assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
+    assert_eq!(
+        std::fs::read_to_string(dst.join("nested/b.txt")).unwrap(),
+        "bbb"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_ne!(
+            std::fs::metadata(src.join("a.txt")).unwrap().ino(),
+            std::fs::metadata(dst.join("a.txt")).unwrap().ino(),
+            "copy mode must produce independent inodes",
+        );
+    }
 }

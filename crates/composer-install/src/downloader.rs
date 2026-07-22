@@ -25,6 +25,7 @@ use eyre::{Result, WrapErr};
 use rayon::prelude::*;
 use sha1::Digest as _;
 
+use crate::LinkMode;
 use crate::archive::{detect_zip_top_level, extract_zip};
 use crate::fetch::{FetchSpec, Fetcher};
 use crate::progress::Progress;
@@ -113,6 +114,7 @@ pub fn fetch_and_extract_dists(
     cache_root: &Path,
     dists: &[DistRequest<'_>],
     progress: &dyn Progress,
+    link_mode: LinkMode,
 ) -> Result<Vec<DistOutcome>> {
     std::fs::create_dir_all(cache_root)
         .wrap_err_with(|| format!("creating {}", cache_root.display()))?;
@@ -126,7 +128,10 @@ pub fn fetch_and_extract_dists(
         })
         .collect::<Result<Vec<_>>>()?;
     dists.par_iter().try_for_each(|d| {
-        extract_from_cache(cache_root, d)?;
+        match link_mode {
+            LinkMode::Extract => extract_from_cache(cache_root, d)?,
+            LinkMode::Hardlink => install_from_store(cache_root, d)?,
+        }
         progress.on_extract(d.package_name);
         Ok::<_, eyre::Report>(())
     })?;
@@ -338,11 +343,13 @@ fn extract_from_cache(cache_root: &Path, dist: &DistRequest<'_>) -> Result<()> {
     Ok(())
 }
 
-/// `<cache_root>/<key>.zip`. The extension is for human-readable cache listings
-/// only; lookup is keyed on the hash (or the git reference when the upstream
-/// didn't publish a hash).
-fn cache_path_for(cache_root: &Path, dist: &DistRequest<'_>) -> PathBuf {
-    let key = if !dist.sha1.is_empty() {
+/// The flat, traversal-safe cache token for a dist — the sha1 shasum when the
+/// upstream published one, else `ref-<hash>` of the git reference, else
+/// `url-<hash>` of the package name + URL (a Composer `type: package` entry with
+/// neither). Both the zip cache (`<key>.zip`) and the extracted store
+/// (`extracted/<key>/`) key off this identical token.
+fn cache_key(dist: &DistRequest<'_>) -> String {
+    if !dist.sha1.is_empty() {
         // A sha1 shasum is already a safe hex string and content-addresses the
         // archive, so use it verbatim.
         dist.sha1.to_string()
@@ -364,8 +371,183 @@ fn cache_path_for(cache_root: &Path, dist: &DistRequest<'_>) -> PathBuf {
         hasher.update(dist.url.as_bytes());
         let digest = hasher.finalize();
         format!("url-{digest:x}")
-    };
-    cache_root.join(format!("{key}.zip"))
+    }
+}
+
+/// `<cache_root>/<key>.zip`. The extension is for human-readable cache listings
+/// only; lookup is keyed on [`cache_key`].
+fn cache_path_for(cache_root: &Path, dist: &DistRequest<'_>) -> PathBuf {
+    cache_root.join(format!("{}.zip", cache_key(dist)))
+}
+
+/// [`LinkMode::Hardlink`] materialization: decompress the cached zip ONCE into a
+/// persistent extracted store, then hard-link the store tree into `vendor_dest`.
+///
+/// The store lives beside the zip cache at `<cache_root>/extracted/<key>/`, with
+/// a sibling `<key>.complete` marker (kept OUT of the store dir so it is never
+/// linked into `vendor/`). The marker is written only after a full extraction,
+/// so a crashed run leaves a marker-less (untrusted) store dir that the next run
+/// re-extracts from scratch. When the store is already complete, no
+/// decompression happens — the whole cost is the hard links.
+///
+/// Patch safety: mutating a linked `vendor/` file is safe only because the
+/// patcher writes atomically (temp file + rename), which drops the link and
+/// gives that one file a fresh inode; the store and every other link are
+/// untouched. See [`LinkMode::Hardlink`].
+#[tracing::instrument(skip_all, fields(package = dist.package_name))]
+fn install_from_store(cache_root: &Path, dist: &DistRequest<'_>) -> Result<()> {
+    let cache_path = cache_path_for(cache_root, dist);
+    let key = cache_key(dist);
+    let extracted_root = cache_root.join("extracted");
+    let store_dir = extracted_root.join(&key);
+    let marker = extracted_root.join(format!("{key}.complete"));
+
+    if !marker.exists() {
+        // A prior half-extraction (crash between mkdir and marker) must not be
+        // trusted — wipe and re-extract into a fresh store.
+        let _ = std::fs::remove_dir_all(&store_dir);
+        std::fs::create_dir_all(&store_dir)
+            .wrap_err_with(|| format!("creating store {}", store_dir.display()))?;
+        let detected: String;
+        let strip = if let Some(s) = dist.strip_prefix {
+            s
+        } else {
+            detected = detect_zip_top_level(&cache_path).wrap_err_with(|| {
+                format!(
+                    "detecting top-level dir in dist for {} ({})",
+                    dist.package_name,
+                    cache_path.display(),
+                )
+            })?;
+            detected.as_str()
+        };
+        extract_zip(&cache_path, &store_dir, strip).wrap_err_with(|| {
+            format!(
+                "extracting dist for {} into store ({} → {})",
+                dist.package_name,
+                cache_path.display(),
+                store_dir.display(),
+            )
+        })?;
+        std::fs::write(&marker, [])
+            .wrap_err_with(|| format!("writing store marker {}", marker.display()))?;
+    }
+
+    if let Some(parent) = dist.vendor_dest.parent() {
+        std::fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("creating {}", parent.display()))?;
+    }
+    let _ = std::fs::remove_dir_all(dist.vendor_dest);
+    std::fs::create_dir_all(dist.vendor_dest)
+        .wrap_err_with(|| format!("creating {}", dist.vendor_dest.display()))?;
+    link_tree(&store_dir, dist.vendor_dest).wrap_err_with(|| {
+        format!(
+            "hard-linking store into vendor for {} ({} → {})",
+            dist.package_name,
+            store_dir.display(),
+            dist.vendor_dest.display(),
+        )
+    })?;
+    Ok(())
+}
+
+/// Mirror the tree at `src` into `dst`, hard-linking regular files (falling back
+/// to a copy on any link error, e.g. a cross-device `EXDEV`). `dst` is assumed
+/// to already exist and be empty. Directories are created, symlinks recreated,
+/// regular files hard-linked-or-copied.
+///
+/// The link-vs-copy decision is made once up front: if `src` and `dst` sit on
+/// different filesystems (comparing device ids on unix) a hard link can never
+/// work, so we copy directly and skip 63k doomed `hard_link` syscalls.
+fn link_tree(src: &Path, dst: &Path) -> Result<()> {
+    let can_link = same_filesystem(src, dst);
+    link_tree_inner(src, dst, can_link)
+}
+
+/// Whether `a` and `b` live on the same filesystem (a hard link is possible).
+/// Unix compares `st_dev`; elsewhere we optimistically say yes and let the
+/// per-file copy fallback handle any failure.
+fn same_filesystem(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(am), Ok(bm)) => am.dev() == bm.dev(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        true
+    }
+}
+
+fn link_tree_inner(src: &Path, dst: &Path, can_link: bool) -> Result<()> {
+    for entry in std::fs::read_dir(src).wrap_err_with(|| format!("reading {}", src.display()))? {
+        let entry = entry.wrap_err_with(|| format!("reading entry in {}", src.display()))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry
+            .file_type()
+            .wrap_err_with(|| format!("stat {}", from.display()))?;
+        if ft.is_dir() {
+            std::fs::create_dir_all(&to).wrap_err_with(|| format!("creating {}", to.display()))?;
+            link_tree_inner(&from, &to, can_link)?;
+        } else if ft.is_symlink() {
+            let target = std::fs::read_link(&from)
+                .wrap_err_with(|| format!("readlink {}", from.display()))?;
+            symlink(&target, &to)
+                .wrap_err_with(|| format!("symlinking {} -> {}", to.display(), target.display()))?;
+        } else {
+            // Regular file: hard-link when possible, copy on any failure so a
+            // cross-device store or a filesystem without link support still
+            // produces a correct (if un-shared) tree.
+            let linked = can_link && std::fs::hard_link(&from, &to).is_ok();
+            if !linked {
+                std::fs::copy(&from, &to)
+                    .wrap_err_with(|| format!("copying {} -> {}", from.display(), to.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Windows: package symlinks are rare and need elevation; recreate as a copy
+    // of the resolved target so the tree stays complete. FLAGGED: this diverges
+    // from a real symlink on Windows.
+    let resolved = link
+        .parent()
+        .map(|p| p.join(target))
+        .unwrap_or_else(|| target.to_path_buf());
+    if resolved.is_dir() {
+        copy_dir_all(&resolved, link)
+    } else {
+        std::fs::copy(&resolved, link).map(|_| ())
+    }
+}
+
+#[cfg(not(unix))]
+fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let f = entry.path();
+        let t = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&f, &t)?;
+        } else {
+            std::fs::copy(&f, &t)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
