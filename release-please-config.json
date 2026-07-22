@@ -17,8 +17,6 @@
     "crates/composer-manifest": {
       "release-as": "0.1.0"
     },
-    "crates/composer-install": {
-      "release-as": "0.1.0"
-    }
+    "crates/composer-install": {}
   }
 }
