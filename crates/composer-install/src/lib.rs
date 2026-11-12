@@ -67,6 +67,7 @@ pub mod progress;
 mod bin_proxy;
 mod orchestrate;
 mod path_link;
+mod stale;
 
 pub use archive::{detect_zip_top_level, extract_zip};
 pub use auth::{

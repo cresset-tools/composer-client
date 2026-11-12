@@ -222,6 +222,42 @@ fn source_only_package_is_rejected_in_preflight() {
 }
 
 #[test]
+fn plugin_package_dist_is_checked_in_preflight() {
+    // A plugin's files are extracted like any other package's, so a plugin
+    // without an installable dist must fail preflight, not later mid-install.
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock = format!(
+        r#"{{
+            "content-hash": "{hash}",
+            "packages": [
+                {{
+                    "name": "acme/plugin",
+                    "version": "1.0.0",
+                    "type": "composer-plugin",
+                    "source": {{
+                        "type": "git",
+                        "url": "https://example/acme/plugin.git",
+                        "reference": "abc"
+                    }}
+                }}
+            ],
+            "packages-dev": []
+        }}"#
+    );
+    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
+
+    let err = run(&cache_root, &proj, InstallOptions::default(), None)
+        .expect_err("a plugin with no dist must be rejected up front");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("acme/plugin"), "{msg}");
+    assert!(msg.contains("source-only"), "{msg}");
+}
+
+#[test]
 fn tar_dist_kind_is_rejected() {
     let tmp = TempDir::new().unwrap();
     let cache_root = cache_in(tmp.path());
@@ -668,54 +704,6 @@ fn second_install_skips_up_to_date_packages() {
 }
 
 #[test]
-fn diff_removes_stale_vendor_dirs() {
-    let tmp = TempDir::new().unwrap();
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-
-    // Simulate a previous install that had acme/foo + acme/stale.
-    let stale_dir = proj.join("vendor/acme/stale");
-    std::fs::create_dir_all(&stale_dir).unwrap();
-
-    let mut old_packages = HashMap::new();
-    old_packages.insert("acme/foo".into(), "ref1".into());
-    old_packages.insert("acme/stale".into(), "ref2".into());
-    let state = Some(InstalledState {
-        packages: old_packages,
-    });
-
-    // Current lock only has acme/foo.
-    let foo_lock: LockPackage = serde_json::from_value(serde_json::json!({
-        "name": "acme/foo",
-        "version": "1.0.0",
-        "dist": {
-            "type": "zip",
-            "url": "https://example/foo.zip",
-            "reference": "ref1",
-            "shasum": "0000000000000000000000000000000000000000"
-        }
-    }))
-    .unwrap();
-
-    // acme/foo's vendor dir exists → up-to-date.
-    let foo_vendor = proj.join("vendor/acme/foo");
-    std::fs::create_dir_all(&foo_vendor).unwrap();
-
-    let installable = vec![&foo_lock];
-    let (need_install, up_to_date, removed) = diff_install_set(
-        &installable,
-        state.as_ref(),
-        &proj,
-        &std::collections::HashSet::new(),
-    );
-
-    assert!(need_install.is_empty(), "acme/foo is up-to-date");
-    assert_eq!(up_to_date, 1);
-    assert_eq!(removed, 1, "acme/stale must be removed");
-    assert!(!stale_dir.exists(), "stale vendor dir must be deleted");
-}
-
-#[test]
 fn missing_vendor_dir_forces_reinstall() {
     let tmp = TempDir::new().unwrap();
     let proj = tmp.path().join("p");
@@ -741,12 +729,7 @@ fn missing_vendor_dir_forces_reinstall() {
 
     // Do NOT create the vendor dir — simulates manual deletion.
     let installable = vec![&foo_lock];
-    let (need_install, up_to_date, removed) = diff_install_set(
-        &installable,
-        state.as_ref(),
-        &proj,
-        &std::collections::HashSet::new(),
-    );
+    let (need_install, up_to_date) = diff_install_set(&installable, state.as_ref(), &proj);
 
     assert_eq!(
         need_install.len(),
@@ -755,7 +738,6 @@ fn missing_vendor_dir_forces_reinstall() {
     );
     assert_eq!(need_install[0].name, "acme/foo");
     assert_eq!(up_to_date, 0);
-    assert_eq!(removed, 0);
 }
 
 #[test]
@@ -788,12 +770,7 @@ fn changed_reference_forces_reinstall() {
     std::fs::create_dir_all(proj.join("vendor/acme/foo")).unwrap();
 
     let installable = vec![&foo_lock];
-    let (need_install, up_to_date, removed) = diff_install_set(
-        &installable,
-        state.as_ref(),
-        &proj,
-        &std::collections::HashSet::new(),
-    );
+    let (need_install, up_to_date) = diff_install_set(&installable, state.as_ref(), &proj);
 
     assert_eq!(
         need_install.len(),
@@ -802,7 +779,6 @@ fn changed_reference_forces_reinstall() {
     );
     assert_eq!(need_install[0].name, "acme/foo");
     assert_eq!(up_to_date, 0);
-    assert_eq!(removed, 0);
 }
 
 // -------------------- opt-in root scripts (ScriptHooks) --------------------
