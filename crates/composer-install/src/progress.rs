@@ -14,13 +14,6 @@ use crate::downloader::DistOutcome;
 /// Called from a rayon parallel iterator, so implementations must be `Sync`
 /// and cheap/non-blocking.
 pub trait Progress: Sync {
-    /// The downloader is about to fetch `dists` archives (cache hits
-    /// included). Fires once, before any other callback, so a bar can set its
-    /// length.
-    fn on_start(&self, dists: usize) {
-        let _ = dists;
-    }
-
     /// One dist finished its download phase — either freshly fetched or a
     /// cache hit (see [`DistOutcome`]). Fires once per package.
     fn on_download(&self, package: &str, outcome: DistOutcome) {
@@ -31,14 +24,6 @@ pub trait Progress: Sync {
     /// once per package, after every download has completed.
     fn on_extract(&self, package: &str) {
         let _ = package;
-    }
-
-    /// A fetch attempt for `package` failed and is about to be retried.
-    /// `attempt` counts the failures so far (1 on the first retry). Fired by
-    /// fetchers that retry, such as [`crate::ReqwestFetcher`]; a final
-    /// failure is returned as an error instead.
-    fn on_retry(&self, package: &str, attempt: u32, error: &eyre::Report) {
-        let _ = (package, attempt, error);
     }
 }
 

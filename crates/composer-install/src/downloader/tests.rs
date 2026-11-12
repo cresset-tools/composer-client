@@ -87,7 +87,6 @@ fn downloads_single_zip_and_extracts_with_strip_prefix() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-abc1234"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -109,155 +108,6 @@ fn downloads_single_zip_and_extracts_with_strip_prefix() {
     assert!(!vendor_dest.join("acme-foo-abc1234").exists());
     let cached = cache_root.join(format!("{hash}.zip"));
     assert!(cached.is_file(), "cache file should be retained for reuse");
-}
-
-/// A gzip tarball wrapping `composer.json` and `src/Foo.php` in `top/`. The
-/// `.tar` URL doesn't say it is compressed; the extractor sniffs it, like
-/// PHP's `PharData`.
-fn build_fixture_tar_gz(top: &str) -> Vec<u8> {
-    let mut b = tar::Builder::new(Vec::new());
-    for (name, body) in [
-        ("composer.json", &br#"{"name":"acme/foo"}"#[..]),
-        ("src/Foo.php", &b"<?php class Foo {}\n"[..]),
-    ] {
-        let mut h = tar::Header::new_gnu();
-        h.set_size(body.len() as u64);
-        h.set_mode(0o644);
-        h.set_cksum();
-        b.append_data(&mut h, format!("{top}/{name}"), body)
-            .unwrap();
-    }
-    let raw = b.into_inner().unwrap();
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(&raw).unwrap();
-    enc.finish().unwrap()
-}
-
-#[test]
-fn downloads_tar_dist_and_extracts_with_detected_prefix() {
-    for link_mode in [LinkMode::Extract, LinkMode::Hardlink] {
-        let tmp = TempDir::new().unwrap();
-        let cache_root = cache_in(tmp.path());
-        let vendor_dest = tmp.path().join("vendor/mirasvit/module-email");
-
-        let top = "mirasvit-module-email-abc1234";
-        let body = build_fixture_tar_gz(top);
-        let hash = sha1_hex(&body);
-
-        let rt = rt();
-        let (uri, _server) = rt.block_on(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(wm_path("/dists/module-email.tar"))
-                .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
-                .mount(&server)
-                .await;
-            let uri = server.uri();
-            (uri, server)
-        });
-
-        let url = format!("{uri}/dists/module-email.tar");
-        let dists = [DistRequest {
-            package_name: "mirasvit/module-email",
-            url: &url,
-            sha1: &hash,
-            reference: "",
-            strip_prefix: None,
-            archive: ArchiveKind::Tar,
-            vendor_dest: &vendor_dest,
-            auth_header: None,
-            auth_header_name: None,
-            project_root: tmp.path(),
-            fallbacks: &[],
-        }];
-
-        fetch_and_extract_dists(&fetcher(), &cache_root, &dists, &NoProgress, link_mode).unwrap();
-
-        assert!(vendor_dest.join("composer.json").is_file(), "{link_mode:?}");
-        assert!(vendor_dest.join("src/Foo.php").is_file(), "{link_mode:?}");
-        assert!(!vendor_dest.join(top).exists(), "wrapper dir stripped");
-        assert!(
-            cache_root.join(format!("{hash}.tar")).is_file(),
-            "tar dist cached under a .tar key"
-        );
-    }
-}
-
-#[derive(Default)]
-struct RecordRetries(
-    std::sync::Mutex<Vec<(String, u32)>>,
-    std::sync::atomic::AtomicUsize,
-);
-
-impl Progress for RecordRetries {
-    fn on_start(&self, dists: usize) {
-        self.1.store(dists, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn on_retry(&self, package: &str, attempt: u32, _error: &eyre::Report) {
-        self.0.lock().unwrap().push((package.to_owned(), attempt));
-    }
-}
-
-#[test]
-fn a_retried_fetch_is_reported_to_progress() {
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let vendor_dest = tmp.path().join("vendor/acme/foo");
-    let body = build_fixture_zip("acme-foo-abc1234");
-    let hash = sha1_hex(&body);
-
-    let rt = rt();
-    let (uri, _server) = rt.block_on(async {
-        let server = MockServer::start().await;
-        // The first request fails, the retry succeeds.
-        Mock::given(method("GET"))
-            .and(wm_path("/dists/acme-foo.zip"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(wm_path("/dists/acme-foo.zip"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
-            .with_priority(2)
-            .mount(&server)
-            .await;
-        let uri = server.uri();
-        (uri, server)
-    });
-
-    let url = format!("{uri}/dists/acme-foo.zip");
-    let dists = [DistRequest {
-        package_name: "acme/foo",
-        url: &url,
-        sha1: &hash,
-        reference: "",
-        strip_prefix: None,
-        archive: ArchiveKind::Zip,
-        vendor_dest: &vendor_dest,
-        auth_header: None,
-        auth_header_name: None,
-        project_root: tmp.path(),
-        fallbacks: &[],
-    }];
-    let progress = RecordRetries::default();
-    fetch_and_extract_dists(
-        &fetcher(),
-        &cache_root,
-        &dists,
-        &progress,
-        LinkMode::Extract,
-    )
-    .unwrap();
-
-    assert!(vendor_dest.join("composer.json").is_file());
-    assert_eq!(
-        *progress.0.lock().unwrap(),
-        vec![("acme/foo".to_owned(), 1)]
-    );
-    assert_eq!(progress.1.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -303,7 +153,6 @@ fn falls_back_to_next_candidate_when_primary_url_fails() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-abc1234"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -358,7 +207,6 @@ fn all_candidates_failing_surfaces_candidate_count() {
         sha1: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         reference: "",
         strip_prefix: None,
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -416,7 +264,6 @@ fn cache_hit_short_circuits_network() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-deadbeef"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -466,7 +313,6 @@ fn hash_mismatch_aborts_install_cleanly() {
         sha1: wrong_hash,
         reference: "",
         strip_prefix: Some("acme-foo-aaaa"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -543,7 +389,6 @@ fn parallel_four_dists_share_one_run() {
             sha1: &pkgs[i].1,
             reference: "",
             strip_prefix: Some(&pkgs[i].0),
-            archive: ArchiveKind::Zip,
             vendor_dest: &dests[i],
             auth_header: None,
             auth_header_name: None,
@@ -597,7 +442,6 @@ fn extract_strips_top_level_directory_via_auto_detect() {
         sha1: &hash,
         reference: "",
         strip_prefix: None,
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -668,7 +512,6 @@ fn dist_request_auth_header_is_sent_on_get() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-abc"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: Some(auth),
         auth_header_name: None,
@@ -720,7 +563,6 @@ fn dist_request_without_auth_fails_when_server_requires_it() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-abc"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -805,7 +647,6 @@ fn local_artifact_dist_is_copied_and_extracted() {
         sha1: &hash,
         reference: "",
         strip_prefix: Some("acme-foo-abc1234"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -844,7 +685,6 @@ fn local_artifact_dist_missing_file_errors_clearly() {
         sha1: "0000000000000000000000000000000000000000",
         reference: "",
         strip_prefix: Some("x"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -883,7 +723,6 @@ fn local_artifact_dist_sha1_mismatch_errors() {
         sha1: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         reference: "",
         strip_prefix: Some("acme-foo-abc1234"),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor_dest,
         auth_header: None,
         auth_header_name: None,
@@ -940,7 +779,6 @@ fn cache_key_distinguishes_dists_without_shasum_or_reference() {
         sha1: "",
         reference: "",
         strip_prefix: None,
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor,
         auth_header: None,
         auth_header_name: None,
@@ -995,7 +833,6 @@ fn hardlink_store_shares_inodes_and_writes_marker() {
         sha1: key,
         reference: "",
         strip_prefix: Some(top),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor,
         auth_header: None,
         auth_header_name: None,
@@ -1051,7 +888,6 @@ fn atomic_rewrite_breaks_only_the_patched_file() {
         sha1: key,
         reference: "",
         strip_prefix: Some(top),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor,
         auth_header: None,
         auth_header_name: None,
@@ -1103,7 +939,6 @@ fn store_without_marker_is_reextracted() {
         sha1: key,
         reference: "",
         strip_prefix: Some(top),
-        archive: ArchiveKind::Zip,
         vendor_dest: &vendor,
         auth_header: None,
         auth_header_name: None,

@@ -20,17 +20,11 @@ use std::time::Duration;
 use eyre::{Result, WrapErr, eyre};
 use sha1::{Digest, Sha1};
 
-use crate::progress::{NoProgress, Progress};
-
 /// One dist to fetch: a single URL plus its verification and auth metadata.
 /// The mirror-fallback loop lives in the downloader, which builds a fresh
 /// `FetchSpec` per candidate URL.
-#[derive(Clone)]
-#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub struct FetchSpec<'a> {
-    /// The package the dist belongs to, for progress and error messages.
-    /// Empty when the fetch is not for a package (a remote patch).
-    pub package_name: &'a str,
     /// The URL to GET. Always `http`/`https` — the downloader handles
     /// non-HTTP (`type: artifact` local file) dists itself.
     pub url: &'a str,
@@ -54,40 +48,6 @@ pub struct FetchSpec<'a> {
     /// Header *name* for the credential. Defaults to `authorization` when
     /// `None`; set to `private-token` for GitLab private-token auth.
     pub auth_header_name: Option<&'a str>,
-    /// Where to report retries ([`Progress::on_retry`]).
-    pub progress: &'a dyn Progress,
-}
-
-impl<'a> FetchSpec<'a> {
-    /// A spec for `url`, verified against `sha1` (empty skips verification),
-    /// placed at `dest` via a temp file in `partial_dir`. No auth, no package
-    /// name, and silent progress; set the public fields to change those.
-    pub fn new(url: &'a str, sha1: &'a str, dest: &'a Path, partial_dir: &'a Path) -> Self {
-        Self {
-            package_name: "",
-            url,
-            sha1,
-            dest,
-            partial_dir,
-            auth_header: None,
-            auth_header_name: None,
-            progress: &NoProgress,
-        }
-    }
-}
-
-impl std::fmt::Debug for FetchSpec<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FetchSpec")
-            .field("package_name", &self.package_name)
-            .field("url", &self.url)
-            .field("sha1", &self.sha1)
-            .field("dest", &self.dest)
-            .field("partial_dir", &self.partial_dir)
-            .field("auth_header", &self.auth_header.map(|_| "<redacted>"))
-            .field("auth_header_name", &self.auth_header_name)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Fetch a single dist URL and place the verified bytes at a cache path.
@@ -161,19 +121,6 @@ impl ReqwestFetcher {
     }
 }
 
-/// Lets the default fetcher download remote patches for
-/// [`composer_patches::build_plan`]: no checksum here, since the plan builder
-/// verifies a declared `sha256` itself.
-impl composer_patches::PatchFetcher for ReqwestFetcher {
-    fn fetch(&self, url: &str, dest: &Path) -> Result<()> {
-        let partial = dest
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(".partial");
-        Fetcher::fetch(self, &FetchSpec::new(url, "", dest, &partial))
-    }
-}
-
 impl Fetcher for ReqwestFetcher {
     fn fetch(&self, spec: &FetchSpec<'_>) -> Result<()> {
         if spec.dest.exists() {
@@ -193,7 +140,6 @@ impl Fetcher for ReqwestFetcher {
                 Err(e) if attempts < RETRY_BUDGET => {
                     attempts += 1;
                     tracing::warn!(error = %e, attempt = attempts, "dist fetch failed; retrying");
-                    spec.progress.on_retry(spec.package_name, attempts, &e);
                     backoff_sleep(attempts);
                 }
                 Err(e) => return Err(e),

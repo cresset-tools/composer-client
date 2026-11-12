@@ -27,9 +27,7 @@ pub struct PatchLock {
     /// Schema version of this crate's fingerprint block.
     #[serde(rename = "_version", default = "default_version")]
     pub version: u32,
-    /// Tool that wrote it. Informational only, nothing reads it back. Always
-    /// `bougie`, matching what bougie's installer writes, so the lock is the
-    /// same whichever tool produced it.
+    /// Tool that wrote it.
     #[serde(rename = "_generator", default)]
     pub generator: String,
     /// Package name → applied patch-set fingerprint.
@@ -52,7 +50,7 @@ impl PatchLock {
     pub fn from_fingerprints(fingerprints: BTreeMap<String, String>) -> Self {
         Self {
             version: default_version(),
-            generator: "bougie".to_string(),
+            generator: "composer-patches".to_string(),
             fingerprints,
             patches: None,
         }

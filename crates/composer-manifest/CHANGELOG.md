@@ -1,17 +1,5 @@
 # Changelog
 
-## [0.2.0](https://github.com/cresset-tools/composer-client/compare/composer-manifest-v0.1.0...composer-manifest-v0.2.0) (2026-11-13)
-
-
-### Features
-
-* **composer-manifest:** edit composer.json repositories, and read a lock package's git source ([8bd5303](https://github.com/cresset-tools/composer-client/commit/8bd53039fd2b789038efd0bd066b32e613d6d48b))
-
-
-### Bug Fixes
-
-* **composer-manifest:** accept "psr-0": [] in lock files ([f995a42](https://github.com/cresset-tools/composer-client/commit/f995a42252d01996dced7f0d2bbbcc24fce2c0e2))
-
 ## 0.1.0 (2026-07-21)
 
 

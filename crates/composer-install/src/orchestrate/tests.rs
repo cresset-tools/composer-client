@@ -26,17 +26,12 @@ fn run(
 ) -> Result<InstallSummary> {
     let fetcher = ReqwestFetcher::new().unwrap();
     let progress = NoProgress;
-    let env = InstallEnv::new(&fetcher, &progress, cache_root);
+    let env = InstallEnv {
+        fetcher: &fetcher,
+        progress: &progress,
+        cache_root,
+    };
     install_from_lock(&env, proj, opts, hooks)
-}
-
-/// Like [`run`], with git-source installs enabled (mirrors beside the cache).
-fn run_with_git(cache_root: &Path, proj: &Path) -> Result<InstallSummary> {
-    let fetcher = ReqwestFetcher::new().unwrap();
-    let progress = NoProgress;
-    let git = crate::GitSourceFetcher::new(cache_root.with_file_name("vcs"));
-    let env = InstallEnv::new(&fetcher, &progress, cache_root).with_source_fetcher(&git);
-    install_from_lock(&env, proj, InstallOptions::default(), None)
 }
 
 /// Write `composer.json` + `composer.lock` to `dir` with the given bytes.
@@ -223,13 +218,11 @@ fn source_only_package_is_rejected_in_preflight() {
         .expect_err("must reject source-only package");
     let msg = format!("{err:#}");
     assert!(msg.contains("acme/sourceonly"), "{msg}");
-    assert!(msg.contains("not enabled"), "{msg}");
+    assert!(msg.contains("source-only"), "{msg}");
 }
 
 #[test]
-fn non_git_source_is_rejected_in_preflight() {
-    // With git installs on, a non-git source (svn/hg) is still a hard
-    // blocker, rejected before any clone.
+fn tar_dist_kind_is_rejected() {
     let tmp = TempDir::new().unwrap();
     let cache_root = cache_in(tmp.path());
     let proj = tmp.path().join("p");
@@ -240,179 +233,11 @@ fn non_git_source_is_rejected_in_preflight() {
             "content-hash": "{hash}",
             "packages": [
                 {{
-                    "name": "acme/sourceonly",
-                    "version": "1.0.0",
-                    "source": {{
-                        "type": "svn",
-                        "url": "https://svn.example/acme/sourceonly",
-                        "reference": "42"
-                    }}
-                }}
-            ],
-            "packages-dev": []
-        }}"#
-    );
-    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
-
-    let err = run_with_git(&cache_root, &proj).expect_err("must reject non-git source");
-    let msg = format!("{err:#}");
-    assert!(msg.contains("acme/sourceonly"), "{msg}");
-    assert!(msg.contains("`svn` source"), "{msg}");
-    assert!(msg.contains("git sources"), "{msg}");
-}
-
-#[cfg(unix)]
-#[test]
-fn git_source_package_installs_from_lock() {
-    // A package with only a git `source` is cloned and checked out into
-    // vendor/, and a second install with the same lock is a no-op.
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let (url, _first, sha) = crate::source::tests::fixture_repo(tmp.path());
-
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock = format!(
-        r#"{{
-            "content-hash": "{hash}",
-            "packages": [
-                {{
-                    "name": "acme/lib",
-                    "version": "1.0.0",
-                    "source": {{ "type": "git", "url": "{url}", "reference": "{sha}" }},
-                    "autoload": {{ "classmap": ["."] }}
-                }}
-            ],
-            "packages-dev": []
-        }}"#
-    );
-    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
-
-    let summary = run_with_git(&cache_root, &proj).expect("git source install must succeed");
-    assert_eq!(summary.packages_installed, 1, "{summary:?}");
-    assert!(proj.join("vendor/acme/lib/second.php").is_file());
-    assert!(proj.join("vendor/autoload.php").is_file(), "autoloader ran");
-
-    let again = run_with_git(&cache_root, &proj).expect("re-install must succeed");
-    assert_eq!(again.packages_installed, 0, "up to date: {again:?}");
-}
-
-#[test]
-fn plugin_package_dist_is_checked_in_preflight() {
-    // A plugin's files are extracted like any other package's, so a plugin
-    // without an installable dist must fail preflight, not later mid-install.
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock = format!(
-        r#"{{
-            "content-hash": "{hash}",
-            "packages": [
-                {{
-                    "name": "acme/plugin",
-                    "version": "1.0.0",
-                    "type": "composer-plugin",
-                    "source": {{
-                        "type": "git",
-                        "url": "https://example/acme/plugin.git",
-                        "reference": "abc"
-                    }}
-                }}
-            ],
-            "packages-dev": []
-        }}"#
-    );
-    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
-
-    let err = run(&cache_root, &proj, InstallOptions::default(), None)
-        .expect_err("a plugin with no dist must be rejected up front");
-    let msg = format!("{err:#}");
-    assert!(msg.contains("acme/plugin"), "{msg}");
-    assert!(msg.contains("no `dist` block"), "{msg}");
-}
-
-#[test]
-fn missing_files_and_unsupported_locks_are_typed_errors() {
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-
-    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
-    assert!(matches!(
-        err.downcast_ref::<InstallError>(),
-        Some(InstallError::MissingManifest { .. })
-    ));
-
-    std::fs::write(proj.join("composer.json"), MINIMAL_COMPOSER_JSON).unwrap();
-    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
-    assert!(matches!(
-        err.downcast_ref::<InstallError>(),
-        Some(InstallError::MissingLock { .. })
-    ));
-
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock = format!(
-        r#"{{
-            "content-hash": "{hash}",
-            "packages": [
-                {{ "name": "acme/a", "version": "1.0.0",
-                   "dist": {{ "type": "xz", "url": "https://example/a.xz" }} }},
-                {{ "name": "acme/b", "version": "1.0.0",
-                   "source": {{ "type": "hg", "url": "https://example/b", "reference": "1" }} }}
-            ],
-            "packages-dev": []
-        }}"#
-    );
-    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
-    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
-    match err.downcast_ref::<InstallError>() {
-        Some(InstallError::Unsupported { reasons }) => assert_eq!(reasons.len(), 2, "{reasons:?}"),
-        other => panic!("expected Unsupported, got {other:?}"),
-    }
-}
-
-#[test]
-fn the_autoload_marker_name_is_configurable() {
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock = format!(r#"{{ "content-hash": "{hash}", "packages": [], "packages-dev": [] }}"#);
-    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
-
-    let fetcher = ReqwestFetcher::new().unwrap();
-    let env = InstallEnv::new(&fetcher, &NoProgress, &cache_root)
-        .with_autoload_marker(".my-tool-autoload-fresh");
-    install_from_lock(&env, &proj, InstallOptions::default(), None).unwrap();
-
-    let composer_dir = proj.join("vendor/composer");
-    assert!(composer_dir.join(".my-tool-autoload-fresh").is_file());
-    assert!(!composer_dir.join(AUTOLOAD_FRESH_MARKER).exists());
-}
-
-#[test]
-fn unsupported_dist_kind_is_rejected() {
-    // A dist type the installer can't extract (e.g. `xz`) is a hard blocker.
-    let tmp = TempDir::new().unwrap();
-    let cache_root = cache_in(tmp.path());
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock = format!(
-        r#"{{
-            "content-hash": "{hash}",
-            "packages": [
-                {{
-                    "name": "acme/xz",
+                    "name": "acme/tar",
                     "version": "1.0.0",
                     "dist": {{
-                        "type": "xz",
-                        "url": "https://example/t.tar.xz",
+                        "type": "tar",
+                        "url": "https://example/t.tar.gz",
                         "shasum": "1111111111111111111111111111111111111111"
                     }}
                 }}
@@ -423,52 +248,11 @@ fn unsupported_dist_kind_is_rejected() {
     write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
 
     let err =
-        run(&cache_root, &proj, InstallOptions::default(), None).expect_err("must reject xz dist");
+        run(&cache_root, &proj, InstallOptions::default(), None).expect_err("must reject tar dist");
     let msg = format!("{err:#}");
-    assert!(msg.contains("acme/xz"), "{msg}");
-    assert!(msg.contains("`xz`"), "{msg}");
-    assert!(msg.contains("`zip` and `tar`"), "{msg}");
-}
-
-#[test]
-fn tar_dist_kind_passes_preflight() {
-    // A `tar` dist is extracted natively. Exercise `preflight` directly so no
-    // network fetch is needed.
-    let tmp = TempDir::new().unwrap();
-    let proj = tmp.path().join("p");
-    std::fs::create_dir_all(&proj).unwrap();
-    let hash = hash_for(MINIMAL_COMPOSER_JSON);
-    let lock_json = format!(
-        r#"{{
-            "content-hash": "{hash}",
-            "packages": [
-                {{
-                    "name": "mirasvit/module-email",
-                    "version": "1.0.0",
-                    "dist": {{
-                        "type": "tar",
-                        "url": "https://example/module-email.tar",
-                        "shasum": "1111111111111111111111111111111111111111"
-                    }}
-                }}
-            ],
-            "packages-dev": []
-        }}"#
-    );
-    let lock_path = proj.join("composer.lock");
-    std::fs::write(&lock_path, &lock_json).unwrap();
-    let lock = Lock::read(&lock_path).unwrap();
-
-    let warnings = preflight(
-        MINIMAL_COMPOSER_JSON.as_bytes(),
-        &lock,
-        false,
-        false,
-        false,
-        &Wording::default(),
-    )
-    .expect("tar dist must pass preflight");
-    assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    assert!(msg.contains("acme/tar"), "{msg}");
+    assert!(msg.contains("`tar`"), "{msg}");
+    assert!(msg.contains("zip dists"), "{msg}");
 }
 
 #[test]
@@ -529,11 +313,11 @@ fn preflight_reports_all_hard_blockers_together() {
                     }}
                 }},
                 {{
-                    "name": "acme/xz",
+                    "name": "acme/tar",
                     "version": "1.0.0",
                     "dist": {{
-                        "type": "xz",
-                        "url": "https://example/t.tar.xz",
+                        "type": "tar",
+                        "url": "https://example/t.tar.gz",
                         "shasum": "2222222222222222222222222222222222222222"
                     }}
                 }},
@@ -555,7 +339,7 @@ fn preflight_reports_all_hard_blockers_together() {
     let err = run(&cache_root, &proj, InstallOptions::default(), None)
         .expect_err("hard blockers must still fail install");
     let msg = format!("{err:#}");
-    assert!(msg.contains("acme/xz"), "xz: {msg}");
+    assert!(msg.contains("acme/tar"), "tar: {msg}");
     assert!(msg.contains("acme/sourceonly"), "sourceonly: {msg}");
 }
 
@@ -884,6 +668,54 @@ fn second_install_skips_up_to_date_packages() {
 }
 
 #[test]
+fn diff_removes_stale_vendor_dirs() {
+    let tmp = TempDir::new().unwrap();
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+
+    // Simulate a previous install that had acme/foo + acme/stale.
+    let stale_dir = proj.join("vendor/acme/stale");
+    std::fs::create_dir_all(&stale_dir).unwrap();
+
+    let mut old_packages = HashMap::new();
+    old_packages.insert("acme/foo".into(), "ref1".into());
+    old_packages.insert("acme/stale".into(), "ref2".into());
+    let state = Some(InstalledState {
+        packages: old_packages,
+    });
+
+    // Current lock only has acme/foo.
+    let foo_lock: LockPackage = serde_json::from_value(serde_json::json!({
+        "name": "acme/foo",
+        "version": "1.0.0",
+        "dist": {
+            "type": "zip",
+            "url": "https://example/foo.zip",
+            "reference": "ref1",
+            "shasum": "0000000000000000000000000000000000000000"
+        }
+    }))
+    .unwrap();
+
+    // acme/foo's vendor dir exists → up-to-date.
+    let foo_vendor = proj.join("vendor/acme/foo");
+    std::fs::create_dir_all(&foo_vendor).unwrap();
+
+    let installable = vec![&foo_lock];
+    let (need_install, up_to_date, removed) = diff_install_set(
+        &installable,
+        state.as_ref(),
+        &proj,
+        &std::collections::HashSet::new(),
+    );
+
+    assert!(need_install.is_empty(), "acme/foo is up-to-date");
+    assert_eq!(up_to_date, 1);
+    assert_eq!(removed, 1, "acme/stale must be removed");
+    assert!(!stale_dir.exists(), "stale vendor dir must be deleted");
+}
+
+#[test]
 fn missing_vendor_dir_forces_reinstall() {
     let tmp = TempDir::new().unwrap();
     let proj = tmp.path().join("p");
@@ -909,7 +741,12 @@ fn missing_vendor_dir_forces_reinstall() {
 
     // Do NOT create the vendor dir — simulates manual deletion.
     let installable = vec![&foo_lock];
-    let (need_install, up_to_date) = diff_install_set(&installable, state.as_ref(), &proj);
+    let (need_install, up_to_date, removed) = diff_install_set(
+        &installable,
+        state.as_ref(),
+        &proj,
+        &std::collections::HashSet::new(),
+    );
 
     assert_eq!(
         need_install.len(),
@@ -918,6 +755,7 @@ fn missing_vendor_dir_forces_reinstall() {
     );
     assert_eq!(need_install[0].name, "acme/foo");
     assert_eq!(up_to_date, 0);
+    assert_eq!(removed, 0);
 }
 
 #[test]
@@ -950,7 +788,12 @@ fn changed_reference_forces_reinstall() {
     std::fs::create_dir_all(proj.join("vendor/acme/foo")).unwrap();
 
     let installable = vec![&foo_lock];
-    let (need_install, up_to_date) = diff_install_set(&installable, state.as_ref(), &proj);
+    let (need_install, up_to_date, removed) = diff_install_set(
+        &installable,
+        state.as_ref(),
+        &proj,
+        &std::collections::HashSet::new(),
+    );
 
     assert_eq!(
         need_install.len(),
@@ -959,6 +802,7 @@ fn changed_reference_forces_reinstall() {
     );
     assert_eq!(need_install[0].name, "acme/foo");
     assert_eq!(up_to_date, 0);
+    assert_eq!(removed, 0);
 }
 
 // -------------------- opt-in root scripts (ScriptHooks) --------------------
@@ -1137,44 +981,4 @@ fn laravel_drift_guard_skipped_when_scripts_on() {
     run(&cache_root, &proj, InstallOptions::default(), Some(&hooks))
         .expect("scripts-on must skip the drift guard");
     assert!(hooks.events.into_inner().contains(&"post_autoload_dump"));
-}
-
-#[test]
-fn wording_names_the_calling_tool_in_warnings_and_blockers() {
-    let wording = Wording {
-        tool: "acme",
-        update_command: "acme update",
-        install_command: "acme run -- composer install",
-        scripts_hint: "Pass `--scripts` to run them.",
-        ..Wording::default()
-    };
-
-    // Scripts declared and not run: the hint is the caller's.
-    let lock: Lock = serde_json::from_str(r#"{ "packages": [], "packages-dev": [] }"#).unwrap();
-    let json = br#"{ "name": "acme/app", "scripts": { "post-install-cmd": "echo hi" } }"#;
-    let warnings = preflight(json, &lock, false, false, false, &wording).unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].ends_with("Pass `--scripts` to run them."));
-    assert!(!warnings[0].contains("ScriptHooks"));
-
-    // A stale lock points at the caller's update command.
-    let stale: Lock =
-        serde_json::from_str(r#"{ "content-hash": "0000", "packages": [], "packages-dev": [] }"#)
-            .unwrap();
-    let warning = content_hash_warning(json, &stale, &wording)
-        .unwrap()
-        .expect("a stale lock warns");
-    assert!(warning.contains("Run `acme update`"), "{warning}");
-
-    // A blocker names the tool and its escape hatch.
-    let svn: Lock = serde_json::from_str(
-        r#"{ "packages": [ { "name": "acme/lib", "version": "1.0.0",
-             "source": { "type": "svn", "url": "https://svn.example/lib", "reference": "1" } } ],
-             "packages-dev": [] }"#,
-    )
-    .unwrap();
-    let err = preflight(b"{}", &svn, false, false, true, &wording).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("acme can only install git sources"), "{msg}");
-    assert!(msg.contains("`acme run -- composer install`"), "{msg}");
 }

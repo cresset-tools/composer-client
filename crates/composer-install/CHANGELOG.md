@@ -1,54 +1,5 @@
 # Changelog
 
-## [0.6.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.5.0...composer-install-v0.6.0) (2026-11-13)
-
-
-### Features
-
-* **composer-install:** extract zstd-compressed tar dists ([9e71054](https://github.com/cresset-tools/composer-client/commit/9e7105449ef6a520df712bcfd0b48ed4e157fe41))
-* **composer-install:** let the caller name itself and its commands in messages ([97fc6d1](https://github.com/cresset-tools/composer-client/commit/97fc6d1834f02418bc59c866bcb747e419b4ca9f))
-
-## [0.5.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.4.0...composer-install-v0.5.0) (2026-11-13)
-
-
-### Features
-
-* **composer-install:** tell Progress how many dists an install fetches ([16535bc](https://github.com/cresset-tools/composer-client/commit/16535bccfa29ef6f8b688e307fa9726c699842f9))
-
-## [0.4.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.3.0...composer-install-v0.4.0) (2026-11-13)
-
-
-### ⚠ BREAKING CHANGES
-
-* **composer-install:** FetchSpec is #[non_exhaustive] with new package_name and progress fields; build it with FetchSpec::new.
-* **composer-install:** InstallEnv is #[non_exhaustive]. Build it with InstallEnv::new(fetcher, progress, cache_root) and enable source installs with with_source_fetcher. DistRequest gains an archive field.
-
-### Features
-
-* **composer-install:** install git source packages through a SourceFetcher seam ([a42b3f6](https://github.com/cresset-tools/composer-client/commit/a42b3f61c1e7b4cbb199687a1b6d0e4445cfe6d6))
-* **composer-install:** install tar dists ([84c35f2](https://github.com/cresset-tools/composer-client/commit/84c35f292bd11adcd43ae5b42963f3466c98dafd))
-* **composer-install:** machine credentials, retry progress, typed errors and a configurable marker ([1c004f9](https://github.com/cresset-tools/composer-client/commit/1c004f9e9ecf642339ff283be2683d1273141b14))
-
-## [0.3.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.2.0...composer-install-v0.3.0) (2026-11-13)
-
-
-### Features
-
-* **composer-install:** ReqwestFetcher downloads remote patches for build_plan ([7d14eab](https://github.com/cresset-tools/composer-client/commit/7d14eab69a9f82ad755a2ab6ad8a554860ad878a))
-
-
-### Bug Fixes
-
-* **composer-install:** remove stale packages reliably, apply vendor-shipped patches, check plugin dists ([7e58f50](https://github.com/cresset-tools/composer-client/commit/7e58f5089b7b95ba1d9bd930e25e87809321d23c))
-
-
-### Dependencies
-
-* The following workspace dependencies were updated
-  * dependencies
-    * composer-manifest bumped from 0.1.0 to 0.2.0
-    * composer-patches bumped from 0.1.0 to 0.2.0
-
 ## [0.2.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.1.1...composer-install-v0.2.0) (2026-07-22)
 
 

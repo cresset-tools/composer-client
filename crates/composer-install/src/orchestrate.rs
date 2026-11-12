@@ -31,21 +31,15 @@ use composer_patches::{ApplyOptions, FailureMode, MaterializedPatch, PatchPlan, 
 use eyre::{Context, Result, eyre};
 use serde_json::Value;
 
-use crate::archive::ArchiveKind;
-use crate::auth::{AuthCredentials, read_all_auth_with};
+use crate::auth::{AuthCredentials, read_all_auth};
 use crate::downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
-use crate::error::InstallError;
 use crate::fetch::Fetcher;
 use crate::progress::Progress;
-use crate::source::{SourceFetcher, SourceSpec, materialize_sources};
-use crate::stale::{InstallRecord, remove_stale_packages};
 
 /// The runtime seams an install needs, injected so the crate stays free of any
-/// HTTP-client / progress-bar / paths policy. Build it with
-/// [`InstallEnv::new`] plus the `with_*` methods, and pass it by reference to
-/// [`install_from_lock`].
+/// HTTP-client / progress-bar / paths policy. Construct it once and pass by
+/// reference to [`install_from_lock`].
 #[derive(Clone, Copy)]
-#[non_exhaustive]
 pub struct InstallEnv<'a> {
     /// Downloads each dist URL to a verified cache file. Use
     /// [`crate::ReqwestFetcher`] for the batteries-included default.
@@ -56,110 +50,12 @@ pub struct InstallEnv<'a> {
     /// created if absent). Composer keeps the equivalent in
     /// `~/.composer/cache/files/`.
     pub cache_root: &'a Path,
-    /// Installs packages the lock pins to a git `source` with no dist. `None`
-    /// (the default) makes such packages a preflight error.
-    pub source_fetcher: Option<&'a dyn SourceFetcher>,
-    /// Machine-wide credentials from the caller's own store (a CLI's login
-    /// command, say), merged above the global `auth.json` and below the
-    /// project's sources: composer.json `config`, project `auth.json` and
-    /// `COMPOSER_AUTH` still win.
-    pub machine_auth: Option<&'a HashMap<String, AuthCredentials>>,
-    /// File name, under `vendor/composer/`, of the autoloader freshness
-    /// marker. Defaults to `.composer-install-autoload-fresh`.
-    pub autoload_marker: &'a str,
-    /// How warnings and preflight blockers name the calling tool and its
-    /// commands. Defaults to tool-neutral text; see [`Wording`].
-    pub wording: Wording<'a>,
-}
-
-/// The words messages use for the calling tool, so a CLI built on this crate
-/// can point its users at its own commands. Start from
-/// [`Wording::default`] and set the fields that differ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Wording<'a> {
-    /// The tool, as the subject of a sentence: "… that `tool` does not
-    /// relocate". Defaults to `this installer`.
-    pub tool: &'a str,
-    /// The command that regenerates `composer.lock`. Defaults to
-    /// `composer update`.
-    pub update_command: &'a str,
-    /// The command that installs what this crate cannot (plugin hooks,
-    /// non-git sources, other dist types). Defaults to `composer install`.
-    pub install_command: &'a str,
-    /// A sentence telling the user how to have root scripts run. Defaults to
-    /// naming [`ScriptHooks`], the library seam.
-    pub scripts_hint: &'a str,
-}
-
-impl Default for Wording<'_> {
-    fn default() -> Self {
-        Self {
-            tool: "this installer",
-            update_command: "composer update",
-            install_command: "composer install",
-            scripts_hint: "Supply a `ScriptHooks` implementation to run them.",
-        }
-    }
-}
-
-impl<'a> InstallEnv<'a> {
-    /// The required seams: a dist fetcher, a progress sink, and the dist cache
-    /// directory. Source installs are off until
-    /// [`with_source_fetcher`](Self::with_source_fetcher).
-    pub fn new(fetcher: &'a dyn Fetcher, progress: &'a dyn Progress, cache_root: &'a Path) -> Self {
-        Self {
-            fetcher,
-            progress,
-            cache_root,
-            source_fetcher: None,
-            machine_auth: None,
-            autoload_marker: AUTOLOAD_FRESH_MARKER,
-            wording: Wording::default(),
-        }
-    }
-
-    /// Name the calling tool and its commands in warnings and preflight
-    /// blockers; see [`Wording`].
-    #[must_use]
-    pub fn with_wording(mut self, wording: Wording<'a>) -> Self {
-        self.wording = wording;
-        self
-    }
-
-    /// Add machine-wide credentials from the caller's own store; see
-    /// [`machine_auth`](Self::machine_auth) for the precedence.
-    #[must_use]
-    pub fn with_machine_auth(mut self, auth: &'a HashMap<String, AuthCredentials>) -> Self {
-        self.machine_auth = Some(auth);
-        self
-    }
-
-    /// Use another file name for the autoloader freshness marker, so a tool
-    /// that already writes its own keeps its warm state.
-    #[must_use]
-    pub fn with_autoload_marker(mut self, name: &'a str) -> Self {
-        self.autoload_marker = name;
-        self
-    }
-
-    /// Install git-source packages with `source_fetcher` — typically a
-    /// [`crate::GitSourceFetcher`].
-    #[must_use]
-    pub fn with_source_fetcher(mut self, source_fetcher: &'a dyn SourceFetcher) -> Self {
-        self.source_fetcher = Some(source_fetcher);
-        self
-    }
 }
 
 impl std::fmt::Debug for InstallEnv<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstallEnv")
             .field("cache_root", &self.cache_root)
-            .field("source_fetcher", &self.source_fetcher.is_some())
-            .field("machine_auth", &self.machine_auth.map(HashMap::len))
-            .field("autoload_marker", &self.autoload_marker)
-            .field("wording", &self.wording)
             .finish_non_exhaustive()
     }
 }
@@ -288,9 +184,8 @@ pub fn install_from_lock(
 ///
 /// # Panics
 ///
-/// Only on an internal invariant violation: every package with a dist yields
-/// at least its own dist URL.
-///
+/// Panics on an internal preflight invariant violation — the inner unwrap on
+/// `p.dist` relies on `preflight` having already rejected source-only packages.
 #[tracing::instrument(skip_all, fields(project_root = %project_root.display()))]
 pub fn install_from_lock_with_patches(
     env: &InstallEnv<'_>,
@@ -301,41 +196,30 @@ pub fn install_from_lock_with_patches(
 ) -> Result<InstallSummary> {
     let composer_json_path = project_root.join("composer.json");
     let composer_lock_path = project_root.join("composer.lock");
-    let composer_json_bytes = match std::fs::read(&composer_json_path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(InstallError::MissingManifest {
-                path: composer_json_path,
-            }
-            .into());
-        }
-        Err(e) => {
-            return Err(
-                eyre::Report::new(e).wrap_err(format!("reading {}", composer_json_path.display()))
-            );
-        }
-    };
+    let composer_json_bytes = std::fs::read(&composer_json_path).wrap_err_with(|| {
+        format!(
+            "{} not found — not a Composer project",
+            composer_json_path.display()
+        )
+    })?;
     let lock = if composer_lock_path.exists() {
         Lock::read(&composer_lock_path)?
     } else {
-        return Err(InstallError::MissingLock {
-            path: composer_lock_path,
-        }
-        .into());
+        return Err(eyre!(
+            "{} not found — run `composer update` first to generate it",
+            composer_lock_path.display()
+        ));
     };
 
     // A stale lock (content-hash mismatch) warns rather than blocks — same as
     // Composer. Surface it first so it leads the warning list.
     let mut warnings = Vec::new();
-    let wording = &env.wording;
-    warnings.extend(content_hash_warning(&composer_json_bytes, &lock, wording)?);
+    warnings.extend(content_hash_warning(&composer_json_bytes, &lock)?);
     warnings.extend(preflight(
         &composer_json_bytes,
         &lock,
         opts.no_dev,
         hooks.is_some(),
-        env.source_fetcher.is_some(),
-        wording,
     )?);
 
     // Assemble per-host auth from every source Composer understands —
@@ -343,14 +227,9 @@ pub fn install_from_lock_with_patches(
     // and the `COMPOSER_AUTH` env var. Dist URLs sitting behind the same auth
     // as the metadata (Magento's `/archives/…`, private satis, GitLab CI
     // Composer ZIPs) need the header; public-CDN dists from Packagist do not.
-    let composer_json_value: Value = serde_json::from_slice(&composer_json_bytes).map_err(|e| {
-        InstallError::InvalidManifest {
-            path: composer_json_path.clone(),
-            detail: e.to_string(),
-        }
-    })?;
-    let auth: HashMap<String, AuthCredentials> =
-        read_all_auth_with(&composer_json_value, project_root, env.machine_auth)?;
+    let composer_json_value: Value = serde_json::from_slice(&composer_json_bytes)
+        .map_err(|e| eyre!("parsing composer.json: {e}"))?;
+    let auth: HashMap<String, AuthCredentials> = read_all_auth(&composer_json_value, project_root)?;
 
     // `pre-install-cmd` / `pre-update-cmd` — before any package operation
     // (download/extract). Only when the user opted into root scripts.
@@ -393,15 +272,14 @@ pub fn install_from_lock_with_patches(
         if !blocking.is_empty() {
             return Err(eyre!(
                 "Laravel post-autoload-dump runs steps before/among the default Laravel steps \
-                 that {tool} does not reproduce:\n  {}\n\n\
-                 `artisan package:discover` and `ComposerScripts::postAutoloadDump` are reproduced natively, \
+                 that this installer does not reproduce:\n  {}\n\nIt reproduces \
+                 `artisan package:discover` and `ComposerScripts::postAutoloadDump` natively, \
                  but only when they run first — a step ahead of or between them may change what \
                  they see. Steps appended *after* the defaults are fine. Reorder so custom steps \
                  come last, or run the script yourself (`composer run-script post-autoload-dump`). \
                  If Laravel changed its default post-autoload-dump, the native discovery is out of \
                  date — please report it.",
                 blocking.join("\n  "),
-                tool = wording.tool,
             ));
         }
     }
@@ -412,7 +290,8 @@ pub fn install_from_lock_with_patches(
         .collect();
 
     // Path packages are materialized separately (symlink-or-copy), not
-    // downloaded.
+    // downloaded. Collect them up front so the stale-sweep in `diff_install_set`
+    // knows to keep their vendor directories.
     let installer_paths = composer_installers::InstallerPaths::parse(&composer_json_value);
     let path_packages: Vec<&LockPackage> = candidates
         .iter()
@@ -430,6 +309,7 @@ pub fn install_from_lock_with_patches(
             project_root.join(rel)
         })
         .collect();
+    let path_keep_names: HashSet<&str> = path_packages.iter().map(|p| p.name.as_str()).collect();
 
     // Diff against the existing installed state to skip packages whose dist
     // reference hasn't changed and whose vendor dir is still present.
@@ -442,20 +322,13 @@ pub fn install_from_lock_with_patches(
     let force_patch: HashSet<&str> = patches
         .map(|plan| compute_force_set(plan, &installable, installed_state.as_ref(), project_root))
         .unwrap_or_default();
-    let (install_set, packages_up_to_date) = diff_install_set_with_force(
+    let (install_set, packages_up_to_date, packages_removed) = diff_install_set_with_force(
         &installable,
         installed_state.as_ref(),
         project_root,
+        &path_keep_names,
         &force_patch,
     );
-
-    // Remove packages that left the lock. `new_record` is every package this
-    // install puts on disk (path and dist alike), at its installer path; it is
-    // written once the install succeeds so the next one knows what to remove
-    // even if an autoloader dump rewrote `installed.json` in between. See
-    // `crate::stale`.
-    let new_record = InstallRecord::for_packages(&candidates, &installer_paths);
-    let packages_removed = remove_stale_packages(project_root, &new_record);
 
     // Native `composer/installers`: a package's on-disk location can be
     // remapped by its `type` and the root `extra.installer-paths`. For the
@@ -479,14 +352,13 @@ pub fn install_from_lock_with_patches(
                     composer_installers::unsupported_framework(p.package_type.as_deref())
             {
                 warnings.push(format!(
-                    "{}: package type '{}' is a composer/installers '{}' type that {tool} \
+                    "{}: package type '{}' is a composer/installers '{}' type that this installer \
                      does not relocate — installing to vendor/{} (the framework may expect it \
                      elsewhere; add an extra.installer-paths entry to override)",
                     p.name,
                     p.package_type.as_deref().unwrap_or(""),
                     framework,
                     p.name,
-                    tool = wording.tool,
                 ));
             }
             project_root.join(rel)
@@ -498,22 +370,10 @@ pub fn install_from_lock_with_patches(
     // host matches the auth map. Mirrors can sit on a different host than the
     // dist URL, so auth is resolved per candidate. String storage lives in a
     // sibling vec so `DistRequest` can carry borrowed data.
-    //
-    // The changed set splits into dist installs and git-source installs.
-    // `vendor_dirs` is index-aligned to `install_set`; both channels fill the
-    // same destinations, and everything after (patches, deploy, autoload,
-    // bins) treats a source checkout exactly like an extracted dist.
-    let dist_indices: Vec<usize> = (0..install_set.len())
-        .filter(|&i| install_set[i].dist.is_some())
-        .collect();
-    let source_indices: Vec<usize> = (0..install_set.len())
-        .filter(|&i| install_set[i].is_source_install())
-        .collect();
-    let candidate_sets: Vec<Vec<DistCandidate>> = dist_indices
+    let candidate_sets: Vec<Vec<DistCandidate>> = install_set
         .iter()
-        .map(|&i| {
-            install_set[i]
-                .dist_urls()
+        .map(|p| {
+            p.dist_urls()
                 .into_iter()
                 .map(|url| {
                     let auth_entry = composer_auth::auth_key(&url)
@@ -528,47 +388,28 @@ pub fn install_from_lock_with_patches(
                 .collect()
         })
         .collect();
-    let dists: Vec<DistRequest<'_>> = dist_indices
+    let dists: Vec<DistRequest<'_>> = install_set
         .iter()
+        .zip(vendor_dirs.iter())
         .zip(candidate_sets.iter())
-        .filter_map(|(&i, candidates)| {
-            let p = install_set[i];
-            let dist = p.dist.as_ref()?;
+        .map(|((p, dest), candidates)| {
+            let dist = p.dist.as_ref().unwrap();
             // `dist_urls()` yields at least the dist's own URL for every package
-            // with a dist.
+            // with a dist, and preflight filtered the rest out.
             let (primary, fallbacks) = candidates
                 .split_first()
                 .expect("non-empty dist_urls for a dist package");
-            Some(DistRequest {
+            DistRequest {
                 package_name: &p.name,
                 url: &primary.url,
                 sha1: dist.shasum.as_deref().unwrap_or(""),
                 reference: dist.reference.as_deref().unwrap_or(""),
                 strip_prefix: None,
-                // Preflight rejected every other dist type.
-                archive: ArchiveKind::from_dist_type(&dist.kind).unwrap_or(ArchiveKind::Zip),
-                vendor_dest: &vendor_dirs[i],
+                vendor_dest: dest,
                 auth_header: primary.auth_header.as_deref(),
                 auth_header_name: primary.auth_header_name,
                 project_root,
                 fallbacks,
-            })
-        })
-        .collect();
-    let source_url_sets: Vec<Vec<String>> = source_indices
-        .iter()
-        .map(|&i| install_set[i].source_urls())
-        .collect();
-    let source_specs: Vec<SourceSpec<'_>> = source_indices
-        .iter()
-        .zip(source_url_sets.iter())
-        .map(|(&i, urls)| {
-            let p = install_set[i];
-            SourceSpec {
-                package_name: &p.name,
-                urls,
-                reference: p.source.as_ref().map_or("", |s| s.reference.as_str()),
-                dest: &vendor_dirs[i],
             }
         })
         .collect();
@@ -580,13 +421,6 @@ pub fn install_from_lock_with_patches(
         env.progress,
         opts.link_mode,
     )?;
-
-    // Clone + check out git-source packages. Preflight rejected them unless a
-    // source fetcher is configured.
-    let sources_installed = match env.source_fetcher {
-        Some(fetcher) if !source_specs.is_empty() => materialize_sources(fetcher, &source_specs)?,
-        _ => 0,
-    };
 
     // Materialize `type: path` packages (symlink-or-copy) into their vendor
     // destinations. Done before the autoload dump so the generated autoloader
@@ -604,20 +438,6 @@ pub fn install_from_lock_with_patches(
     // *before* the Magento deploy so `extra.map`-copied files carry the patched
     // content — Composer's ordering.
     if let Some(plan) = patches {
-        // Deferred (vendor-shipped) patches can be read now that their owning
-        // packages are extracted: materialize and fold them into the plan
-        // before applying, so they patch and earn a `patches.lock.json`
-        // fingerprint like any other. The clone keeps the caller's plan intact.
-        let resolved;
-        let plan = if plan.deferred.is_empty() {
-            plan
-        } else {
-            let mut p = plan.clone();
-            p.resolve_deferred()
-                .wrap_err("materializing vendor-shipped patches after install")?;
-            resolved = p;
-            &resolved
-        };
         apply_patch_plan(
             plan,
             &install_set,
@@ -648,7 +468,7 @@ pub fn install_from_lock_with_patches(
     // observable exactly as before.
     let autoload_marker = project_root
         .join("vendor/composer")
-        .join(env.autoload_marker);
+        .join(AUTOLOAD_FRESH_MARKER);
     let lock_bytes = std::fs::read(&composer_lock_path).unwrap_or_default();
     let fingerprint =
         autoload_fingerprint(&composer_json_bytes, &lock_bytes, opts.no_dev).to_string();
@@ -733,18 +553,8 @@ pub fn install_from_lock_with_patches(
     .unwrap_or(u32::MAX);
     // Fold path-package materialization into the totals: a freshly linked/copied
     // path package counts as installed; an unchanged one counts as up-to-date.
-    // Git-source installs (always freshly checked out when in the install
-    // set) count as installed too.
-    let packages_installed = packages_installed
-        .saturating_add(path_summary.linked)
-        .saturating_add(u32::try_from(sources_installed).unwrap_or(u32::MAX));
+    let packages_installed = packages_installed.saturating_add(path_summary.linked);
     let packages_up_to_date = packages_up_to_date.saturating_add(path_summary.up_to_date);
-    if let Err(e) = new_record.write(project_root) {
-        warnings.push(format!(
-            "could not record the installed packages ({e}); the next install may not \
-             remove packages that leave the lock"
-        ));
-    }
     Ok(InstallSummary {
         project_root: project_root.to_path_buf(),
         packages_installed,
@@ -781,17 +591,6 @@ fn compute_force_set<'a>(
         .tracked_packages()
         .filter(|name| plan.fingerprint_changed(name))
         .collect();
-
-    // Deferred (vendor-shipped) patches have no fingerprint yet: their source
-    // isn't readable until the owning package is on disk. Force their targets
-    // so they're re-extracted pristine before the patch is applied after the
-    // install. On a clean vendor/ the target is extracted anyway; this also
-    // covers a present target whose patch-owning package alone was missing.
-    for target in plan.deferred_targets() {
-        if let Some(p) = installable.iter().find(|p| p.name == target) {
-            force.insert(p.name.as_str());
-        }
-    }
 
     if plan.root_patches.is_empty() {
         return force;
@@ -1092,17 +891,10 @@ fn read_installed_state(project_root: &Path) -> Option<InstalledState> {
         if name.is_empty() {
             continue;
         }
-        // The dist reference, or the source reference for a git-source
-        // install, so source packages diff on their checked-out commit.
         let reference = pkg
             .get("dist")
             .and_then(|d| d.get("reference"))
             .and_then(|r| r.as_str())
-            .or_else(|| {
-                pkg.get("source")
-                    .and_then(|s| s.get("reference"))
-                    .and_then(|r| r.as_str())
-            })
             .unwrap_or("");
         packages.insert(name.to_string(), reference.to_string());
     }
@@ -1111,33 +903,49 @@ fn read_installed_state(project_root: &Path) -> Option<InstalledState> {
 }
 
 /// Diff the lock file's installable set against the existing `installed.json`
-/// state. Returns the subset of packages that need downloading/extracting and
-/// the count already up-to-date. Removing packages that left the lock is
-/// separate; see [`crate::stale::remove_stale_packages`].
+/// state. Returns the subset of packages that need downloading/extracting, the
+/// count already up-to-date, and the count of stale packages whose vendor dirs
+/// were removed.
 #[cfg(test)]
 pub(crate) fn diff_install_set<'a>(
     installable: &[&'a LockPackage],
     installed_state: Option<&InstalledState>,
     project_root: &Path,
-) -> (Vec<&'a LockPackage>, u32) {
-    diff_install_set_with_force(installable, installed_state, project_root, &HashSet::new())
+    keep_names: &HashSet<&str>,
+) -> (Vec<&'a LockPackage>, u32, u32) {
+    diff_install_set_with_force(
+        installable,
+        installed_state,
+        project_root,
+        keep_names,
+        &HashSet::new(),
+    )
 }
 
 /// Like [`diff_install_set`], but `force` names packages that must be
 /// (re-)installed even when their dist reference matches and the vendor dir is
-/// present — the patch-aware path.
+/// present — the patch-aware path. `keep_names` are packages materialized by
+/// another path (e.g. `type: path` repositories) whose vendor dirs must not be
+/// swept as stale.
 pub(crate) fn diff_install_set_with_force<'a>(
     installable: &[&'a LockPackage],
     installed_state: Option<&InstalledState>,
     project_root: &Path,
+    keep_names: &HashSet<&str>,
     force: &HashSet<&str>,
-) -> (Vec<&'a LockPackage>, u32) {
+) -> (Vec<&'a LockPackage>, u32, u32) {
     let Some(state) = installed_state else {
-        return (installable.to_vec(), 0);
+        return (installable.to_vec(), 0, 0);
     };
 
     let mut need_install: Vec<&'a LockPackage> = Vec::new();
     let mut up_to_date: u32 = 0;
+    // `keep_names` are packages installed by another path (path repositories
+    // materialize into `vendor/` separately) — their directories must not be
+    // swept as stale here.
+    let mut wanted_names: HashSet<&str> = installable.iter().map(|p| p.name.as_str()).collect();
+    wanted_names.extend(keep_names.iter().copied());
+
     for p in installable {
         if !force.contains(p.name.as_str()) && dist_up_to_date(p, state, project_root) {
             up_to_date = up_to_date.saturating_add(1);
@@ -1145,7 +953,21 @@ pub(crate) fn diff_install_set_with_force<'a>(
         }
         need_install.push(p);
     }
-    (need_install, up_to_date)
+
+    // Remove stale packages: present in the old installed state but absent from
+    // the current lock's installable set.
+    let mut removed: u32 = 0;
+    for old_name in state.packages.keys() {
+        if !wanted_names.contains(old_name.as_str()) {
+            let vendor_dir = project_root.join("vendor").join(old_name);
+            if vendor_dir.is_dir() {
+                let _ = std::fs::remove_dir_all(&vendor_dir);
+                removed = removed.saturating_add(1);
+            }
+        }
+    }
+
+    (need_install, up_to_date, removed)
 }
 
 /// Whether `p` is already installed at the locked revision: its recorded dist
@@ -1153,9 +975,11 @@ pub(crate) fn diff_install_set_with_force<'a>(
 /// single source of truth for "no fresh extract needed", shared by the
 /// install-set diff and the patch-coupling force computation.
 fn dist_up_to_date(p: &LockPackage, state: &InstalledState, project_root: &Path) -> bool {
-    // The dist reference, or the source reference for a git-source install:
-    // a source package re-clones only when its locked commit changes.
-    let lock_ref = p.install_reference();
+    let lock_ref = p
+        .dist
+        .as_ref()
+        .and_then(|d| d.reference.as_deref())
+        .unwrap_or("");
     state.packages.get(&p.name).is_some_and(|installed_ref| {
         installed_ref == lock_ref && project_root.join("vendor").join(&p.name).is_dir()
     })
@@ -1164,7 +988,7 @@ fn dist_up_to_date(p: &LockPackage, state: &InstalledState, project_root: &Path)
 /// Marker file (under `vendor/composer/`) holding the autoloader freshness
 /// fingerprint from the last dump. Its presence + match lets a subsequent
 /// unchanged sync skip the autoloader regeneration.
-pub(crate) const AUTOLOAD_FRESH_MARKER: &str = ".composer-install-autoload-fresh";
+const AUTOLOAD_FRESH_MARKER: &str = ".composer-install-autoload-fresh";
 
 /// Fingerprint of everything the non-optimized autoloader output depends on:
 /// the root manifest bytes (autoload / config / installer-paths in `extra`) and
@@ -1190,11 +1014,7 @@ fn autoload_fingerprint(composer_json_bytes: &[u8], lock_bytes: &[u8], no_dev: b
 /// lock's package set anyway, so the user gets a reproducible (if slightly
 /// stale) environment rather than a refusal. We mirror that — return the
 /// warning string on mismatch, `None` otherwise.
-fn content_hash_warning(
-    composer_json_bytes: &[u8],
-    lock: &Lock,
-    wording: &Wording<'_>,
-) -> Result<Option<String>> {
+fn content_hash_warning(composer_json_bytes: &[u8], lock: &Lock) -> Result<Option<String>> {
     let Some(expected) = &lock.content_hash else {
         // Pre-1.10 lockfiles don't carry a content-hash. Composer tolerates
         // them; we do too rather than refuse to install a working historical
@@ -1208,8 +1028,7 @@ fn content_hash_warning(
     Ok(Some(format!(
         "composer.lock is out of sync with composer.json (content-hash {expected} → {actual}); \
          installing the locked package set anyway — you may be getting outdated dependencies. \
-         Run `{}` to regenerate the lock.",
-        wording.update_command,
+         Run `composer update` to regenerate the lock.",
     )))
 }
 
@@ -1230,15 +1049,7 @@ fn preflight(
     lock: &Lock,
     no_dev: bool,
     scripts_on: bool,
-    sources_on: bool,
-    wording: &Wording<'_>,
 ) -> Result<Vec<String>> {
-    let Wording {
-        tool,
-        install_command,
-        scripts_hint,
-        ..
-    } = *wording;
     let mut reasons: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut plugin_packages: Vec<String> = Vec::new();
@@ -1257,9 +1068,11 @@ fn preflight(
             value.get("scripts").unwrap_or(&Value::Null),
         )
     {
-        warnings.push(format!(
-            "composer.json declares `scripts`; they are not run by default. {scripts_hint}"
-        ));
+        warnings.push(
+            "composer.json declares `scripts`; they are not run by default. \
+             Supply a `ScriptHooks` implementation to run them."
+                .into(),
+        );
     }
 
     let packages: Vec<&LockPackage> = if no_dev {
@@ -1280,44 +1093,23 @@ fn preflight(
             continue;
         }
         if p.is_composer_plugin() {
-            // Plugin install-time hooks are arbitrary PHP we won't run, but the
-            // package's FILES install like any other (plugins can double as
-            // runtime libraries: php-http/discovery's classes are called by
-            // opensearch-php at runtime). Collect the name for one aggregated
-            // hooks-not-run warning after the loop, then fall through to the
-            // dist checks below: since we extract it, its dist must be
-            // installable.
+            // Plugin install-time hooks are arbitrary PHP we won't run. Skip the
+            // package. Names are aggregated into one warning after the loop.
             plugin_packages.push(p.name.clone());
+            continue;
         }
         let Some(dist) = &p.dist else {
-            // No dist: install from a git `source` when a source fetcher is
-            // configured. Composer normalizes github/gitlab/bitbucket sources
-            // to `git` in the lock; hg/svn sources are not supported.
-            match &p.source {
-                Some(src) if src.kind == "git" && sources_on => {}
-                Some(src) if src.kind == "git" => reasons.push(format!(
-                    "package `{}` has no `dist` block, only a git source, and git source \
-                     installs are not enabled — configure a source fetcher, or install it \
-                     with `{install_command}`.",
-                    p.name,
-                )),
-                Some(src) => reasons.push(format!(
-                    "package `{}` has a `{}` source; {tool} can only install git \
-                     sources — install it with `{install_command}`.",
-                    p.name, src.kind,
-                )),
-                None => reasons.push(format!(
-                    "package `{}` has no `dist` block and no git `source` to clone — install \
-                     it with `{install_command}`.",
-                    p.name,
-                )),
-            }
+            reasons.push(format!(
+                "package `{}` has no `dist` block (source-only install); \
+                 this installer does not clone VCS sources — run a full `composer install`.",
+                p.name,
+            ));
             continue;
         };
-        if ArchiveKind::from_dist_type(&dist.kind).is_none() {
+        if dist.kind != "zip" {
             reasons.push(format!(
-                "package `{}` uses dist type `{}`; {tool} handles only `zip` and \
-                 `tar` dists — install it with `{install_command}`.",
+                "package `{}` uses dist type `{}`; this installer currently supports only \
+                 zip dists — run a full `composer install`.",
                 p.name, dist.kind,
             ));
         }
@@ -1336,18 +1128,17 @@ fn preflight(
         };
         warnings.push(format!(
             "{noun} {names} {verb} Composer plugins (type `composer-plugin`); \
-             {pronoun} files install like any other package's, but {tool} \
-             does not run plugin install-time hooks. Run `{install_command}` \
-             if the hook behavior is required.",
+             this installer does not run plugin install-time hooks and skips \
+             {pronoun}. Run a full `composer install` if the plugin behavior is required.",
             verb = if plugin_packages.len() == 1 {
                 "is a"
             } else {
                 "are"
             },
             pronoun = if plugin_packages.len() == 1 {
-                "its"
+                "the package itself"
             } else {
-                "their"
+                "them"
             },
         ));
     }
@@ -1355,7 +1146,14 @@ fn preflight(
     if reasons.is_empty() {
         Ok(warnings)
     } else {
-        Err(InstallError::Unsupported { reasons }.into())
+        let bullets = reasons
+            .iter()
+            .map(|r| format!("  - {r}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(eyre!(
+            "this lockfile requires features this installer does not handle:\n{bullets}",
+        ))
     }
 }
 
