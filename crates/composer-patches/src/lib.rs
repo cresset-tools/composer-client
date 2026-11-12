@@ -17,6 +17,7 @@
 //!
 //! - [`model`] — the internal [`Patch`] model + v1/v2 dialect normalization.
 //! - [`diff`] — multi-file diff splitting + `-p` path stripping (over flickzeug).
+//! - [`build`] — build a project's [`PatchPlan`] from its `composer.json`.
 //! - [`apply`] — apply a patch to a tree with the `-p` fallback loop.
 //! - [`make`] — author a patch from an edited tree (the inverse of `apply`).
 //! - [`resolve`] — build the root patch set from `composer.json` + patches-file.
@@ -27,6 +28,7 @@
 //! - [`report`] — per-application outcome ([`ApplyReport`]).
 
 pub mod apply;
+pub mod build;
 pub mod diff;
 pub mod lock;
 pub mod make;
@@ -38,6 +40,10 @@ pub mod resolve;
 pub mod target;
 
 pub use apply::{ApplyOptions, apply_patch_text};
+pub use build::{
+    NoFetch, PatchFetcher, PlanOptions, build_plan, lock_install_paths, patches_dir_name,
+    resolve_all,
+};
 pub use model::{DepthSpec, FailureMode, Patch, PatchScope, PatchSource, parse_target_patches};
 pub use pass::{PackageApplyResult, append_patches_txt, apply_package_patches};
 pub use plan::{DeferredPatch, MaterializedPatch, PatchPlan, RootPatch, fingerprint};

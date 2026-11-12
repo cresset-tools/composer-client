@@ -121,6 +121,29 @@ impl ReqwestFetcher {
     }
 }
 
+/// Lets the default fetcher download remote patches for
+/// [`composer_patches::build_plan`]: no checksum here, since the plan builder
+/// verifies a declared `sha256` itself.
+impl composer_patches::PatchFetcher for ReqwestFetcher {
+    fn fetch(&self, url: &str, dest: &Path) -> Result<()> {
+        let partial = dest
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".partial");
+        Fetcher::fetch(
+            self,
+            &FetchSpec {
+                url,
+                sha1: "",
+                dest,
+                partial_dir: &partial,
+                auth_header: None,
+                auth_header_name: None,
+            },
+        )
+    }
+}
+
 impl Fetcher for ReqwestFetcher {
     fn fetch(&self, spec: &FetchSpec<'_>) -> Result<()> {
         if spec.dest.exists() {

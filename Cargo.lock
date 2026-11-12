@@ -318,6 +318,7 @@ dependencies = [
 name = "composer-patches"
 version = "0.1.0"
 dependencies = [
+ "composer-installers",
  "eyre",
  "flickzeug",
  "serde",
