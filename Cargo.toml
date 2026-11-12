@@ -38,6 +38,7 @@ repository = "https://github.com/cresset-tools/composer-client"
 [workspace.dependencies]
 # Shared Composer-domain crates from composer-rs (crates.io). Pinned to match
 # bougie so composer-autoload stays byte-equivalent to what bougie ships.
+composer-auth = "0.2"
 composer-php-json = "0.1"
 composer-semver = "0.1.0"
 composer-wire = "0.1"
@@ -77,8 +78,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 zip = { version = "8.0", default-features = false, features = ["deflate"] }
 # Composer's dist `shasum` field is legacy sha1.
 sha1 = "0.10"
-# HTTP Basic credential encoding for the auth headers.
-base64 = "0.22"
 # Dev-only: mock HTTP server + a current-thread runtime to drive it from the
 # blocking downloader tests.
 wiremock = "0.6"

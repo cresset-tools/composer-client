@@ -376,7 +376,7 @@ pub fn install_from_lock_with_patches(
             p.dist_urls()
                 .into_iter()
                 .map(|url| {
-                    let auth_entry = auth_origin_from_url(&url)
+                    let auth_entry = composer_auth::auth_key(&url)
                         .and_then(|origin| auth.get(origin))
                         .map(|creds| (creds.header_value(), creds.header_name()));
                     DistCandidate {
@@ -983,22 +983,6 @@ fn dist_up_to_date(p: &LockPackage, state: &InstalledState, project_root: &Path)
     state.packages.get(&p.name).is_some_and(|installed_ref| {
         installed_ref == lock_ref && project_root.join("vendor").join(&p.name).is_dir()
     })
-}
-
-/// Extract the credential-lookup key for a dist URL — Composer's origin: the
-/// authority between `://` and the next `/`, INCLUDING any `:port` suffix
-/// (`127.0.0.1:8080`, `repo.magento.com`). Returns `None` for URLs without a
-/// parseable host (e.g. file URIs in tests). Keys per-host auth lookup the same
-/// way Composer does: the port is part of the key, so a mirror on a non-default
-/// port matches its `auth.json` entry.
-fn auth_origin_from_url(url: &str) -> Option<&str> {
-    let after_scheme = url.split_once("://")?.1;
-    let host_and_port = after_scheme.split('/').next()?;
-    if host_and_port.is_empty() {
-        None
-    } else {
-        Some(host_and_port)
-    }
 }
 
 /// Marker file (under `vendor/composer/`) holding the autoloader freshness

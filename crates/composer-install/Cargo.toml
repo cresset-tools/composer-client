@@ -24,7 +24,7 @@ composer-installers = { path = "../composer-installers", version = "0.1.0" }
 composer-autoload = { path = "../composer-autoload", version = "0.1.0" }
 composer-patches = { path = "../composer-patches", version = "0.1.0" }
 
-base64 = { workspace = true }
+composer-auth = { workspace = true }
 eyre = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }

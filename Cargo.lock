@@ -241,6 +241,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "composer-auth"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccb75eb05a2407e8f2c163a60e7ba5ed0dd556cb335566daa76eff94cf3957d"
+dependencies = [
+ "base64",
+ "serde_json",
+]
+
+[[package]]
 name = "composer-autoload"
 version = "0.1.0"
 dependencies = [
@@ -262,7 +272,7 @@ dependencies = [
 name = "composer-install"
 version = "0.2.0"
 dependencies = [
- "base64",
+ "composer-auth",
  "composer-autoload",
  "composer-installers",
  "composer-manifest",
