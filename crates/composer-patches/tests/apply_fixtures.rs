@@ -99,6 +99,9 @@ fn crosscheck_gnu_patch(
         .current_dir(work.path())
         .arg(format!("-p{depth}"))
         .arg("--no-backup-if-mismatch")
+        // Git for Windows' GNU patch reads and writes in text mode, turning LF
+        // into CRLF; --binary keeps the bytes as they are (a no-op on POSIX).
+        .arg("--binary")
         .arg("-i")
         .arg("-") // patch from stdin
         .stdin(std::process::Stdio::piped())

@@ -7,12 +7,13 @@
 //! memory first and only committed to disk once the whole patch succeeds, so a
 //! patch never leaves a half-modified tree behind.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr as _, bail};
-use flickzeug::{ApplyConfig, FuzzyConfig, apply_with_config};
+use flickzeug::{ApplyConfig, FuzzyConfig, LineEndHandling, apply_with_config};
 
 use crate::diff::{self, ChangeKind, FileDiff, strip_components};
 use crate::model::DepthSpec;
@@ -124,16 +125,18 @@ fn plan_at_depth<'a>(
                 let base = fs::read_to_string(&abs_path).wrap_err_with(|| {
                     format!("cannot read `{}` for patching", abs_path.display())
                 })?;
-                let (content, stats) = apply_with_config(&base, &file.diff, config)
-                    .map_err(|e| eyre::eyre!("hunk failed on `{rel}`: {e}"))?;
+                let (content, stats) =
+                    apply_with_config(&base, &file.diff, config_for(&base, config).as_ref())
+                        .map_err(|e| eyre::eyre!("hunk failed on `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.lines_deleted += stats.lines_deleted;
                 report.hunks_applied += stats.hunks_applied;
                 Some(content)
             }
             ChangeKind::Create => {
-                let (content, stats) = apply_with_config("", &file.diff, config)
-                    .map_err(|e| eyre::eyre!("cannot synthesize new file `{rel}`: {e}"))?;
+                let (content, stats) =
+                    apply_with_config("", &file.diff, config_for("", config).as_ref())
+                        .map_err(|e| eyre::eyre!("cannot synthesize new file `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.hunks_applied += stats.hunks_applied;
                 Some(content)
@@ -188,6 +191,21 @@ fn action_for(kind: ChangeKind) -> FileAction {
 
 /// Write `bytes` to `path` atomically (temp file in the same dir + rename),
 /// so a crash mid-write never leaves a truncated source file.
+/// The config for patching `base`. flickzeug keeps the file's own line
+/// endings, and an empty file has none, so it falls back to the platform's:
+/// CRLF on Windows. A new or empty file takes the patch's line endings
+/// instead, so the result is the same on every platform.
+fn config_for<'c>(base: &str, config: &'c ApplyConfig) -> Cow<'c, ApplyConfig> {
+    if base.is_empty() {
+        Cow::Owned(ApplyConfig {
+            line_end_strategy: LineEndHandling::EnsurePatchLineEnding,
+            ..config.clone()
+        })
+    } else {
+        Cow::Borrowed(config)
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile_in(dir)?;
