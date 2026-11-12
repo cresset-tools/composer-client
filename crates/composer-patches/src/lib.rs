@@ -10,7 +10,7 @@
 //!
 //! The crate is intentionally FS/PHP-agnostic, like `composer-installers` and
 //! the sibling installer crates: it parses, plans, and applies; the host
-//! (`this crate-composer-resolver`'s install orchestrator) decides *when* to call
+//! (`composer-install`'s install orchestrator) decides *when* to call
 //! it and wires it into the install lifecycle.
 //!
 //! # Module map
@@ -40,7 +40,7 @@ pub mod target;
 pub use apply::{ApplyOptions, apply_patch_text};
 pub use model::{DepthSpec, FailureMode, Patch, PatchScope, PatchSource, parse_target_patches};
 pub use pass::{PackageApplyResult, append_patches_txt, apply_package_patches};
-pub use plan::{MaterializedPatch, PatchPlan, RootPatch, fingerprint};
+pub use plan::{DeferredPatch, MaterializedPatch, PatchPlan, RootPatch, fingerprint};
 pub use report::{ApplyReport, FileAction, FileOutcome};
 pub use resolve::{resolve_patches_dir, resolve_root};
 pub use target::{InferredTarget, infer_target};

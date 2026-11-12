@@ -35,6 +35,7 @@ use crate::auth::{AuthCredentials, read_all_auth};
 use crate::downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
 use crate::fetch::Fetcher;
 use crate::progress::Progress;
+use crate::stale::{InstallRecord, remove_stale_packages};
 
 /// The runtime seams an install needs, injected so the crate stays free of any
 /// HTTP-client / progress-bar / paths policy. Construct it once and pass by
@@ -290,8 +291,7 @@ pub fn install_from_lock_with_patches(
         .collect();
 
     // Path packages are materialized separately (symlink-or-copy), not
-    // downloaded. Collect them up front so the stale-sweep in `diff_install_set`
-    // knows to keep their vendor directories.
+    // downloaded.
     let installer_paths = composer_installers::InstallerPaths::parse(&composer_json_value);
     let path_packages: Vec<&LockPackage> = candidates
         .iter()
@@ -309,7 +309,6 @@ pub fn install_from_lock_with_patches(
             project_root.join(rel)
         })
         .collect();
-    let path_keep_names: HashSet<&str> = path_packages.iter().map(|p| p.name.as_str()).collect();
 
     // Diff against the existing installed state to skip packages whose dist
     // reference hasn't changed and whose vendor dir is still present.
@@ -322,13 +321,20 @@ pub fn install_from_lock_with_patches(
     let force_patch: HashSet<&str> = patches
         .map(|plan| compute_force_set(plan, &installable, installed_state.as_ref(), project_root))
         .unwrap_or_default();
-    let (install_set, packages_up_to_date, packages_removed) = diff_install_set_with_force(
+    let (install_set, packages_up_to_date) = diff_install_set_with_force(
         &installable,
         installed_state.as_ref(),
         project_root,
-        &path_keep_names,
         &force_patch,
     );
+
+    // Remove packages that left the lock. `new_record` is every package this
+    // install puts on disk (path and dist alike), at its installer path; it is
+    // written once the install succeeds so the next one knows what to remove
+    // even if an autoloader dump rewrote `installed.json` in between. See
+    // `crate::stale`.
+    let new_record = InstallRecord::for_packages(&candidates, &installer_paths);
+    let packages_removed = remove_stale_packages(project_root, &new_record);
 
     // Native `composer/installers`: a package's on-disk location can be
     // remapped by its `type` and the root `extra.installer-paths`. For the
@@ -438,6 +444,20 @@ pub fn install_from_lock_with_patches(
     // *before* the Magento deploy so `extra.map`-copied files carry the patched
     // content — Composer's ordering.
     if let Some(plan) = patches {
+        // Deferred (vendor-shipped) patches can be read now that their owning
+        // packages are extracted: materialize and fold them into the plan
+        // before applying, so they patch and earn a `patches.lock.json`
+        // fingerprint like any other. The clone keeps the caller's plan intact.
+        let resolved;
+        let plan = if plan.deferred.is_empty() {
+            plan
+        } else {
+            let mut p = plan.clone();
+            p.resolve_deferred()
+                .wrap_err("materializing vendor-shipped patches after install")?;
+            resolved = p;
+            &resolved
+        };
         apply_patch_plan(
             plan,
             &install_set,
@@ -555,6 +575,12 @@ pub fn install_from_lock_with_patches(
     // path package counts as installed; an unchanged one counts as up-to-date.
     let packages_installed = packages_installed.saturating_add(path_summary.linked);
     let packages_up_to_date = packages_up_to_date.saturating_add(path_summary.up_to_date);
+    if let Err(e) = new_record.write(project_root) {
+        warnings.push(format!(
+            "could not record the installed packages ({e}); the next install may not \
+             remove packages that leave the lock"
+        ));
+    }
     Ok(InstallSummary {
         project_root: project_root.to_path_buf(),
         packages_installed,
@@ -591,6 +617,17 @@ fn compute_force_set<'a>(
         .tracked_packages()
         .filter(|name| plan.fingerprint_changed(name))
         .collect();
+
+    // Deferred (vendor-shipped) patches have no fingerprint yet: their source
+    // isn't readable until the owning package is on disk. Force their targets
+    // so they're re-extracted pristine before the patch is applied after the
+    // install. On a clean vendor/ the target is extracted anyway; this also
+    // covers a present target whose patch-owning package alone was missing.
+    for target in plan.deferred_targets() {
+        if let Some(p) = installable.iter().find(|p| p.name == target) {
+            force.insert(p.name.as_str());
+        }
+    }
 
     if plan.root_patches.is_empty() {
         return force;
@@ -903,49 +940,33 @@ fn read_installed_state(project_root: &Path) -> Option<InstalledState> {
 }
 
 /// Diff the lock file's installable set against the existing `installed.json`
-/// state. Returns the subset of packages that need downloading/extracting, the
-/// count already up-to-date, and the count of stale packages whose vendor dirs
-/// were removed.
+/// state. Returns the subset of packages that need downloading/extracting and
+/// the count already up-to-date. Removing packages that left the lock is
+/// separate; see [`crate::stale::remove_stale_packages`].
 #[cfg(test)]
 pub(crate) fn diff_install_set<'a>(
     installable: &[&'a LockPackage],
     installed_state: Option<&InstalledState>,
     project_root: &Path,
-    keep_names: &HashSet<&str>,
-) -> (Vec<&'a LockPackage>, u32, u32) {
-    diff_install_set_with_force(
-        installable,
-        installed_state,
-        project_root,
-        keep_names,
-        &HashSet::new(),
-    )
+) -> (Vec<&'a LockPackage>, u32) {
+    diff_install_set_with_force(installable, installed_state, project_root, &HashSet::new())
 }
 
 /// Like [`diff_install_set`], but `force` names packages that must be
 /// (re-)installed even when their dist reference matches and the vendor dir is
-/// present — the patch-aware path. `keep_names` are packages materialized by
-/// another path (e.g. `type: path` repositories) whose vendor dirs must not be
-/// swept as stale.
+/// present — the patch-aware path.
 pub(crate) fn diff_install_set_with_force<'a>(
     installable: &[&'a LockPackage],
     installed_state: Option<&InstalledState>,
     project_root: &Path,
-    keep_names: &HashSet<&str>,
     force: &HashSet<&str>,
-) -> (Vec<&'a LockPackage>, u32, u32) {
+) -> (Vec<&'a LockPackage>, u32) {
     let Some(state) = installed_state else {
-        return (installable.to_vec(), 0, 0);
+        return (installable.to_vec(), 0);
     };
 
     let mut need_install: Vec<&'a LockPackage> = Vec::new();
     let mut up_to_date: u32 = 0;
-    // `keep_names` are packages installed by another path (path repositories
-    // materialize into `vendor/` separately) — their directories must not be
-    // swept as stale here.
-    let mut wanted_names: HashSet<&str> = installable.iter().map(|p| p.name.as_str()).collect();
-    wanted_names.extend(keep_names.iter().copied());
-
     for p in installable {
         if !force.contains(p.name.as_str()) && dist_up_to_date(p, state, project_root) {
             up_to_date = up_to_date.saturating_add(1);
@@ -953,21 +974,7 @@ pub(crate) fn diff_install_set_with_force<'a>(
         }
         need_install.push(p);
     }
-
-    // Remove stale packages: present in the old installed state but absent from
-    // the current lock's installable set.
-    let mut removed: u32 = 0;
-    for old_name in state.packages.keys() {
-        if !wanted_names.contains(old_name.as_str()) {
-            let vendor_dir = project_root.join("vendor").join(old_name);
-            if vendor_dir.is_dir() {
-                let _ = std::fs::remove_dir_all(&vendor_dir);
-                removed = removed.saturating_add(1);
-            }
-        }
-    }
-
-    (need_install, up_to_date, removed)
+    (need_install, up_to_date)
 }
 
 /// Whether `p` is already installed at the locked revision: its recorded dist
@@ -1093,10 +1100,14 @@ fn preflight(
             continue;
         }
         if p.is_composer_plugin() {
-            // Plugin install-time hooks are arbitrary PHP we won't run. Skip the
-            // package. Names are aggregated into one warning after the loop.
+            // Plugin install-time hooks are arbitrary PHP we won't run, but the
+            // package's FILES install like any other (plugins can double as
+            // runtime libraries: php-http/discovery's classes are called by
+            // opensearch-php at runtime). Collect the name for one aggregated
+            // hooks-not-run warning after the loop, then fall through to the
+            // dist checks below: since we extract it, its dist must be
+            // installable.
             plugin_packages.push(p.name.clone());
-            continue;
         }
         let Some(dist) = &p.dist else {
             reasons.push(format!(
@@ -1128,17 +1139,18 @@ fn preflight(
         };
         warnings.push(format!(
             "{noun} {names} {verb} Composer plugins (type `composer-plugin`); \
-             this installer does not run plugin install-time hooks and skips \
-             {pronoun}. Run a full `composer install` if the plugin behavior is required.",
+             {pronoun} files install like any other package's, but this installer \
+             does not run plugin install-time hooks. Run a full `composer install` \
+             if the hook behavior is required.",
             verb = if plugin_packages.len() == 1 {
                 "is a"
             } else {
                 "are"
             },
             pronoun = if plugin_packages.len() == 1 {
-                "the package itself"
+                "its"
             } else {
-                "them"
+                "their"
             },
         ));
     }

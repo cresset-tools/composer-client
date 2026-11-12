@@ -7,12 +7,13 @@
 //! memory first and only committed to disk once the whole patch succeeds, so a
 //! patch never leaves a half-modified tree behind.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use eyre::{Result, bail};
-use flickzeug::{ApplyConfig, FuzzyConfig, apply_with_config};
+use eyre::{Result, WrapErr as _, bail};
+use flickzeug::{ApplyConfig, FuzzyConfig, LineEndHandling, apply_with_config};
 
 use crate::diff::{self, ChangeKind, FileDiff, strip_components};
 use crate::model::DepthSpec;
@@ -121,19 +122,21 @@ fn plan_at_depth<'a>(
 
         let new_content = match file.kind {
             ChangeKind::Modify => {
-                let base = fs::read_to_string(&abs_path).map_err(|e| {
-                    eyre::eyre!("cannot read `{}` for patching: {e}", abs_path.display())
+                let base = fs::read_to_string(&abs_path).wrap_err_with(|| {
+                    format!("cannot read `{}` for patching", abs_path.display())
                 })?;
-                let (content, stats) = apply_with_config(&base, &file.diff, config)
-                    .map_err(|e| eyre::eyre!("hunk failed on `{rel}`: {e}"))?;
+                let (content, stats) =
+                    apply_with_config(&base, &file.diff, config_for(&base, config).as_ref())
+                        .map_err(|e| eyre::eyre!("hunk failed on `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.lines_deleted += stats.lines_deleted;
                 report.hunks_applied += stats.hunks_applied;
                 Some(content)
             }
             ChangeKind::Create => {
-                let (content, stats) = apply_with_config("", &file.diff, config)
-                    .map_err(|e| eyre::eyre!("cannot synthesize new file `{rel}`: {e}"))?;
+                let (content, stats) =
+                    apply_with_config("", &file.diff, config_for("", config).as_ref())
+                        .map_err(|e| eyre::eyre!("cannot synthesize new file `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.hunks_applied += stats.hunks_applied;
                 Some(content)
@@ -164,13 +167,13 @@ fn commit(ops: &[PlannedOp<'_>]) -> Result<()> {
             Some(content) => {
                 if let Some(parent) = op.abs_path.parent() {
                     fs::create_dir_all(parent)
-                        .map_err(|e| eyre::eyre!("cannot create `{}`: {e}", parent.display()))?;
+                        .wrap_err_with(|| format!("cannot create `{}`", parent.display()))?;
                 }
                 atomic_write(&op.abs_path, content.as_bytes())?;
             }
             None => {
                 fs::remove_file(&op.abs_path)
-                    .map_err(|e| eyre::eyre!("cannot delete `{}`: {e}", op.abs_path.display()))?;
+                    .wrap_err_with(|| format!("cannot delete `{}`", op.abs_path.display()))?;
             }
         }
     }
@@ -188,16 +191,30 @@ fn action_for(kind: ChangeKind) -> FileAction {
 
 /// Write `bytes` to `path` atomically (temp file in the same dir + rename),
 /// so a crash mid-write never leaves a truncated source file.
+/// The config for patching `base`. flickzeug keeps the file's own line
+/// endings, and an empty file has none, so it falls back to the platform's:
+/// CRLF on Windows. A new or empty file takes the patch's line endings
+/// instead, so the result is the same on every platform.
+fn config_for<'c>(base: &str, config: &'c ApplyConfig) -> Cow<'c, ApplyConfig> {
+    if base.is_empty() {
+        Cow::Owned(ApplyConfig {
+            line_end_strategy: LineEndHandling::EnsurePatchLineEnding,
+            ..config.clone()
+        })
+    } else {
+        Cow::Borrowed(config)
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile_in(dir)?;
-    tmp.write_all(bytes)
-        .map_err(|e| eyre::eyre!("write to temp file failed: {e}"))?;
+    tmp.write_all(bytes).wrap_err("write to temp file failed")?;
     tmp.flush().ok();
     let tmp_path = tmp.into_temp_path();
     tmp_path
         .persist(path)
-        .map_err(|e| eyre::eyre!("cannot finalize `{}`: {e}", path.display()))?;
+        .wrap_err_with(|| format!("cannot finalize `{}`", path.display()))?;
     Ok(())
 }
 
@@ -205,7 +222,7 @@ fn tempfile_in(dir: &Path) -> Result<tempfile::NamedTempFile> {
     tempfile::Builder::new()
         .prefix(".composer-patch-")
         .tempfile_in(dir)
-        .map_err(|e| eyre::eyre!("cannot create temp file in `{}`: {e}", dir.display()))
+        .wrap_err_with(|| format!("cannot create temp file in `{}`", dir.display()))
 }
 
 #[cfg(test)]
