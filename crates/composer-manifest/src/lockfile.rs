@@ -565,6 +565,187 @@ pub fn apply_require_change(project_root: &Path, change: &RequireChange) -> Resu
     })
 }
 
+/// Result of [`add_repositories`]. Parallels [`RequireApplied`].
+#[derive(Debug, Clone)]
+pub struct RepositoriesApplied {
+    pub composer_json_path: PathBuf,
+    pub composer_lock_path: Option<PathBuf>,
+    pub new_content_hash: String,
+    /// Entries added (0 = every URL was already present), or for
+    /// [`remove_repository`] entries removed.
+    pub added: usize,
+}
+
+/// Add `{"type":"composer","url":…}` entries to the project composer.json's
+/// `repositories`, deduped by URL (so re-running is idempotent). This is how a
+/// tool provisions a registry the committed way, visible to stock Composer.
+///
+/// Preserves the existing array vs named-object form; an absent `repositories`
+/// becomes an array. Because `repositories` is part of the content-hash, an
+/// existing composer.lock's `content-hash` is updated too so `install` /
+/// `validate` don't flag a stale lock. Mirrors [`apply_require_change`].
+pub fn add_repositories(project_root: &Path, urls: &[String]) -> Result<RepositoriesApplied> {
+    let composer_json_path = project_root.join("composer.json");
+    let composer_lock_path = project_root.join("composer.lock");
+
+    let mut composer_json = read_json_file(&composer_json_path)?;
+    let added = repositories_add(&mut composer_json, urls)?;
+
+    let written_bytes = encode_for_disk(&composer_json);
+    let new_content_hash = content_hash(&written_bytes)?;
+    write_json_bytes(&composer_json_path, &written_bytes)?;
+
+    // `repositories` isn't in the lock's `platform` map (unlike `require`), so
+    // only the content-hash needs syncing when a lock exists.
+    let lock_updated = if composer_lock_path.exists() {
+        let mut lock = read_json_file(&composer_lock_path)?;
+        lock_set_content_hash(&mut lock, &new_content_hash)?;
+        write_json_file(&composer_lock_path, &lock)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(RepositoriesApplied {
+        composer_json_path,
+        composer_lock_path: lock_updated.then_some(composer_lock_path),
+        new_content_hash,
+        added,
+    })
+}
+
+/// Remove every repository entry whose `url` is `url` from the project
+/// composer.json's `repositories` (array or named-object form), syncing an
+/// existing composer.lock's `content-hash` like [`add_repositories`]. Returns
+/// how many entries went; with none, nothing is written.
+pub fn remove_repository(project_root: &Path, url: &str) -> Result<RepositoriesApplied> {
+    let composer_json_path = project_root.join("composer.json");
+    let composer_lock_path = project_root.join("composer.lock");
+
+    let mut composer_json = read_json_file(&composer_json_path)?;
+    let removed = repositories_remove(&mut composer_json, url)?;
+    let written_bytes = encode_for_disk(&composer_json);
+    let new_content_hash = content_hash(&written_bytes)?;
+    let mut lock_updated = false;
+    if removed > 0 {
+        write_json_bytes(&composer_json_path, &written_bytes)?;
+        if composer_lock_path.exists() {
+            let mut lock = read_json_file(&composer_lock_path)?;
+            lock_set_content_hash(&mut lock, &new_content_hash)?;
+            write_json_file(&composer_lock_path, &lock)?;
+            lock_updated = true;
+        }
+    }
+    Ok(RepositoriesApplied {
+        composer_json_path,
+        composer_lock_path: lock_updated.then_some(composer_lock_path),
+        new_content_hash,
+        added: removed,
+    })
+}
+
+/// Drop repository entries whose `url` is `url`. An absent `repositories` has
+/// nothing to drop. Returns how many went.
+fn repositories_remove(composer_json: &mut Value, url: &str) -> Result<usize> {
+    let obj = composer_json
+        .as_object_mut()
+        .ok_or_else(|| eyre!("composer.json top level must be a JSON object"))?;
+    let has_url = |e: &Value| e.get("url").and_then(Value::as_str) == Some(url);
+    match obj.get_mut("repositories") {
+        None => Ok(0),
+        Some(Value::Array(arr)) => {
+            let before = arr.len();
+            arr.retain(|e| !has_url(e));
+            Ok(before - arr.len())
+        }
+        Some(Value::Object(named)) => {
+            let before = named.len();
+            named.retain(|_, e| !has_url(e));
+            Ok(before - named.len())
+        }
+        Some(_) => Err(eyre!(
+            "composer.json `repositories` must be an array or object"
+        )),
+    }
+}
+
+/// Insert composer-type repository entries (by URL) into a composer.json value's
+/// `repositories`, deduping by URL. Preserves array vs named-object form; a
+/// missing value becomes an array. Returns how many were newly added.
+fn repositories_add(composer_json: &mut Value, urls: &[String]) -> Result<usize> {
+    let obj = composer_json
+        .as_object_mut()
+        .ok_or_else(|| eyre!("composer.json top level must be a JSON object"))?;
+    let entry = obj
+        .entry("repositories")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    match entry {
+        Value::Array(arr) => {
+            let mut seen = repo_urls_in(arr.iter());
+            let mut added = 0;
+            for url in urls {
+                if seen.insert(url.clone()) {
+                    arr.push(composer_repo_entry(url));
+                    added += 1;
+                }
+            }
+            Ok(added)
+        }
+        Value::Object(named) => {
+            let mut seen = repo_urls_in(named.values());
+            let mut added = 0;
+            for url in urls {
+                if seen.insert(url.clone()) {
+                    let key = unique_repo_key(url, named);
+                    named.insert(key, composer_repo_entry(url));
+                    added += 1;
+                }
+            }
+            Ok(added)
+        }
+        _ => Err(eyre!(
+            "composer.json `repositories` must be an array or object"
+        )),
+    }
+}
+
+/// The set of `url`s already declared among some repository entries.
+fn repo_urls_in<'a, I: Iterator<Item = &'a Value>>(
+    entries: I,
+) -> std::collections::HashSet<String> {
+    entries
+        .filter_map(|e| e.get("url").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+fn composer_repo_entry(url: &str) -> Value {
+    serde_json::json!({ "type": "composer", "url": url })
+}
+
+/// A stable, human-ish key for the named-object `repositories` form, derived
+/// from the URL's path (e.g. `https://host/acme/web` → `acme/web`), made unique
+/// against existing keys.
+fn unique_repo_key(url: &str, existing: &serde_json::Map<String, Value>) -> String {
+    let base = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split_once('/')
+        .map_or("", |(_host, path)| path)
+        .trim_matches('/');
+    let base = if base.is_empty() { "repo" } else { base };
+    if !existing.contains_key(base) {
+        return base.to_owned();
+    }
+    let mut n = 1;
+    loop {
+        let key = format!("{base}-{n}");
+        if !existing.contains_key(&key) {
+            return key;
+        }
+        n += 1;
+    }
+}
+
 // -----------------------------------------------------------------
 // Typed read API for `composer.lock`.
 //
@@ -848,9 +1029,8 @@ pub struct LockSource {
     pub url: String,
     pub reference: String,
     /// Source-mirror entries (same `{url, preferred}` shape as dist
-    /// mirrors). This crate never installs from source, but a
-    /// Composer-written lock may carry them — kept so a read → write
-    /// round-trip doesn't silently drop the key.
+    /// mirrors). [`LockPackage::source_urls`] tries them alongside the
+    /// source's own URL, and a read → write round-trip keeps the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrors: Vec<DistMirror>,
 }
@@ -945,6 +1125,78 @@ impl LockPackage {
     /// for them in `InstalledVersions.php` (mirroring Composer).
     pub fn is_metapackage(&self) -> bool {
         self.package_type.as_deref() == Some("metapackage")
+    }
+
+    /// `true` when this package must be installed from its git `source`
+    /// rather than a dist: it carries a `source` block, has no `dist`
+    /// to fetch, and isn't a metapackage. This is the trigger for a
+    /// clone-and-checkout install — the common case being a private fork
+    /// or a satis repo that only publishes source. A package carrying
+    /// *both* a dist and a source installs from the dist (there is no
+    /// `--prefer-source`), so this is deliberately gated on `dist.is_none()`.
+    pub fn is_source_install(&self) -> bool {
+        self.dist.is_none() && self.source.is_some() && !self.is_metapackage()
+    }
+
+    /// The revision this package is locked at, for install-freshness
+    /// diffing: the dist reference when there is a dist, else the source
+    /// reference (a full git sha for a source install). Empty when the
+    /// package carries neither — a metapackage, which is never installed.
+    pub fn install_reference(&self) -> &str {
+        if let Some(dist) = &self.dist
+            && let Some(r) = dist.reference.as_deref()
+        {
+            return r;
+        }
+        self.source.as_ref().map_or("", |s| s.reference.as_str())
+    }
+
+    /// Clone-URL candidates for this package's git `source`, in the order
+    /// the installer should try them: the source's own `url` first, then
+    /// each mirror's substituted URL (a `preferred` mirror moves to the
+    /// front), duplicates dropped. Mirrors the shape of [`dist_urls`] so a
+    /// Private-Packagist source mirror is tried before the origin host.
+    /// Empty when the package has no `source`.
+    pub fn source_urls(&self) -> Vec<String> {
+        let Some(source) = &self.source else {
+            return Vec::new();
+        };
+        let name = self.name.to_ascii_lowercase();
+        let version: Cow<'_, str> = match &self.version_normalized {
+            Some(v) => Cow::Borrowed(v.as_str()),
+            None => match composer_semver::version::Version::parse(&self.version) {
+                Ok(v) => Cow::Owned(v.normalized),
+                Err(_) => Cow::Borrowed(self.version.as_str()),
+            },
+        };
+        let process = |template: &str| {
+            process_mirror_url(
+                template,
+                &name,
+                &version,
+                &self.version,
+                Some(source.reference.as_str()),
+                &source.kind,
+            )
+        };
+        let first = if source.url.contains('%') {
+            process(&source.url)
+        } else {
+            source.url.clone()
+        };
+        let mut urls = vec![first];
+        for mirror in &source.mirrors {
+            let url = process(&mirror.url);
+            if urls.contains(&url) {
+                continue;
+            }
+            if mirror.preferred {
+                urls.insert(0, url);
+            } else {
+                urls.push(url);
+            }
+        }
+        urls
     }
 
     /// Download URL candidates for this package's dist, in the order
@@ -1490,6 +1742,139 @@ mod tests {
         let written_json = std::fs::read(proj.join("composer.json")).unwrap();
         let recomputed = content_hash(&written_json).unwrap();
         assert_eq!(recomputed, applied.new_content_hash);
+    }
+
+    #[test]
+    fn add_repositories_writes_array_dedups_and_syncs_lock_hash() {
+        let td = TempDir::new().unwrap();
+        let proj = td.path();
+        std::fs::write(
+            proj.join("composer.json"),
+            "{\n    \"name\": \"acme/app\",\n    \"require\": {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("composer.lock"),
+            "{\n    \"content-hash\": \"stale\",\n    \"packages\": [],\n    \"packages-dev\": []\n}\n",
+        )
+        .unwrap();
+
+        let urls = vec![
+            "https://pkgs.example/acme/web".to_string(),
+            "https://pkgs.example/acme/api".to_string(),
+        ];
+        let applied = add_repositories(proj, &urls).unwrap();
+        assert_eq!(applied.added, 2);
+        assert!(applied.composer_lock_path.is_some());
+
+        // composer.json gains an array `repositories` with both composer URLs,
+        // in order.
+        let cj: Value =
+            serde_json::from_slice(&std::fs::read(proj.join("composer.json")).unwrap()).unwrap();
+        let repos = cj.get("repositories").unwrap().as_array().unwrap();
+        let got: Vec<&str> = repos.iter().map(|r| r["url"].as_str().unwrap()).collect();
+        assert_eq!(
+            got,
+            [
+                "https://pkgs.example/acme/web",
+                "https://pkgs.example/acme/api"
+            ]
+        );
+        assert!(repos.iter().all(|r| r["type"] == "composer"));
+
+        // The lock's content-hash is updated and self-consistent with the
+        // composer.json we just wrote — what `install`/`validate` demand.
+        let written = std::fs::read(proj.join("composer.json")).unwrap();
+        let expect_hash = content_hash(&written).unwrap();
+        assert_eq!(applied.new_content_hash, expect_hash);
+        let lock: Value =
+            serde_json::from_slice(&std::fs::read(proj.join("composer.lock")).unwrap()).unwrap();
+        assert_eq!(lock["content-hash"], Value::String(expect_hash));
+
+        // Idempotent: re-adding an existing URL plus a new one adds only the new.
+        let urls2 = vec![
+            "https://pkgs.example/acme/web".to_string(),
+            "https://pkgs.example/acme/theme".to_string(),
+        ];
+        let applied2 = add_repositories(proj, &urls2).unwrap();
+        assert_eq!(applied2.added, 1, "only the new URL is added");
+        let cj2: Value =
+            serde_json::from_slice(&std::fs::read(proj.join("composer.json")).unwrap()).unwrap();
+        assert_eq!(cj2["repositories"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn remove_repository_drops_matching_urls_and_syncs_lock_hash() {
+        let td = TempDir::new().unwrap();
+        let proj = td.path();
+        std::fs::write(
+            proj.join("composer.json"),
+            "{\n    \"repositories\": {\n        \"web\": {\"type\": \"composer\", \"url\": \"https://pkgs.example/acme/web\"},\n        \"api\": {\"type\": \"composer\", \"url\": \"https://pkgs.example/acme/api\"}\n    }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("composer.lock"),
+            "{\n    \"content-hash\": \"stale\",\n    \"packages\": [],\n    \"packages-dev\": []\n}\n",
+        )
+        .unwrap();
+
+        let applied = remove_repository(proj, "https://pkgs.example/acme/web").unwrap();
+        assert_eq!(applied.added, 1);
+        let cj: Value =
+            serde_json::from_slice(&std::fs::read(proj.join("composer.json")).unwrap()).unwrap();
+        let repos = cj["repositories"].as_object().unwrap();
+        assert_eq!(repos.keys().collect::<Vec<_>>(), ["api"]);
+        let lock: Value =
+            serde_json::from_slice(&std::fs::read(proj.join("composer.lock")).unwrap()).unwrap();
+        assert_eq!(
+            lock["content-hash"],
+            Value::String(applied.new_content_hash)
+        );
+
+        // An absent URL removes nothing and leaves both files alone.
+        let before = std::fs::read(proj.join("composer.json")).unwrap();
+        let none = remove_repository(proj, "https://pkgs.example/acme/gone").unwrap();
+        assert_eq!(none.added, 0);
+        assert!(none.composer_lock_path.is_none());
+        assert_eq!(std::fs::read(proj.join("composer.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn source_only_package_installs_from_source_with_mirrors() {
+        let lock = Lock::from_bytes(
+            br#"{"content-hash": "x", "packages": [
+                {"name": "Acme/Fork", "version": "1.2.0",
+                 "source": {"type": "git", "url": "https://git.example/acme/fork.git",
+                            "reference": "abc123",
+                            "mirrors": [
+                                {"url": "https://mirror.example/%package%.git", "preferred": false},
+                                {"url": "https://fast.example/%package%.git", "preferred": true}
+                            ]}},
+                {"name": "acme/both", "version": "1.0.0",
+                 "dist": {"type": "zip", "url": "https://dist.example/both.zip", "reference": "d1"},
+                 "source": {"type": "git", "url": "https://git.example/acme/both.git", "reference": "s1"}},
+                {"name": "acme/meta", "version": "1.0.0", "type": "metapackage",
+                 "source": {"type": "git", "url": "https://git.example/acme/meta.git", "reference": "m1"}}
+            ], "packages-dev": []}"#,
+        )
+        .unwrap();
+        let [fork, both, meta] = &lock.packages[..] else {
+            panic!("three packages");
+        };
+        assert!(fork.is_source_install());
+        assert_eq!(fork.install_reference(), "abc123");
+        assert_eq!(
+            fork.source_urls(),
+            [
+                "https://fast.example/acme/fork.git",
+                "https://git.example/acme/fork.git",
+                "https://mirror.example/acme/fork.git",
+            ]
+        );
+        // A dist wins over a source; a metapackage is never installed.
+        assert!(!both.is_source_install());
+        assert_eq!(both.install_reference(), "d1");
+        assert!(!meta.is_source_install());
     }
 
     #[test]
