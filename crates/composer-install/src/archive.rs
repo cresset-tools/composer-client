@@ -3,7 +3,7 @@
 //! The [`Fetcher`](crate::Fetcher) trait only *downloads* (its default impl
 //! wraps `reqwest`); extraction has no HTTP or app coupling, so it lives here
 //! and runs the same regardless of who fetched the bytes. Composer dists are
-//! `zip` (nearly always) or `tar` (plain or gzip-compressed); the wrapping
+//! `zip` (nearly always) or `tar` (plain, gzip or zstd); the wrapping
 //! directory (`<vendor>-<package>-<short_sha>/`) is detected and stripped.
 
 use std::fs::{self, File};
@@ -17,8 +17,8 @@ use eyre::{Result, WrapErr, eyre};
 pub enum ArchiveKind {
     /// `dist.type: zip` — every Packagist and VCS-driver dist.
     Zip,
-    /// `dist.type: tar` — a tarball, plain or gzip-compressed (Composer's
-    /// `TarDownloader` reads both through `PharData`).
+    /// `dist.type: tar` — a tarball: plain, gzip or zstd (Composer's
+    /// `TarDownloader` reads the first two through `PharData`).
     Tar,
 }
 
@@ -182,12 +182,13 @@ fn rewrite_archive_path(path: &Path, strip_prefix: &str) -> Option<PathBuf> {
     }
 }
 
-/// Open a tarball for reading, transparently gunzipping it when it starts
-/// with the gzip magic. Anything else is read as a plain POSIX tar, so an
-/// unsupported codec surfaces as a tar parse error.
+/// Open a tarball for reading, picking the codec from its leading magic
+/// bytes: gzip (`1f 8b`), zstd (`28 b5 2f fd`), else a plain POSIX tar. The
+/// lock never records a tar dist's codec, so it is sniffed, as PHP's
+/// `PharData` does. An unsupported codec surfaces as a tar parse error.
 fn open_tar_reader(archive: &Path) -> Result<Box<dyn Read>> {
     let mut f = File::open(archive).wrap_err_with(|| format!("opening {}", archive.display()))?;
-    let mut magic = [0u8; 3];
+    let mut magic = [0u8; 4];
     let mut filled = 0;
     while filled < magic.len() {
         let n = f
@@ -203,7 +204,11 @@ fn open_tar_reader(archive: &Path) -> Result<Box<dyn Read>> {
     let magic = &magic[..filled];
     if magic.starts_with(&[0x1f, 0x8b]) {
         Ok(Box::new(flate2::read::GzDecoder::new(f)))
-    } else if magic == b"BZh" {
+    } else if magic == [0x28, 0xb5, 0x2f, 0xfd] {
+        let decoder = zstd::stream::read::Decoder::new(f)
+            .wrap_err_with(|| format!("reading zstd stream {}", archive.display()))?;
+        Ok(Box::new(decoder))
+    } else if magic.starts_with(b"BZh") {
         Err(eyre!(
             "{} is a bzip2 tarball, which this installer does not extract",
             archive.display()
@@ -213,7 +218,7 @@ fn open_tar_reader(archive: &Path) -> Result<Box<dyn Read>> {
     }
 }
 
-/// Extract a tarball (plain or gzip) into `into`, stripping `strip_prefix`
+/// Extract a tarball (plain, gzip or zstd) into `into`, stripping `strip_prefix`
 /// the same way [`extract_zip`] does.
 ///
 /// Tar entry paths come straight off the header and `Entry::unpack` does not
@@ -376,7 +381,14 @@ fn symlink_target_escapes(link_rel: &Path, target: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn tar_with(entries: &[(&str, &[u8])], gzip: bool) -> Vec<u8> {
+    #[derive(Clone, Copy)]
+    enum Codec {
+        Plain,
+        Gzip,
+        Zstd,
+    }
+
+    fn tar_with(entries: &[(&str, &[u8])], codec: Codec) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         for (name, body) in entries {
             let mut header = tar::Header::new_gnu();
@@ -386,17 +398,20 @@ mod tests {
             builder.append_data(&mut header, name, *body).unwrap();
         }
         let raw = builder.into_inner().unwrap();
-        if !gzip {
-            return raw;
+        match codec {
+            Codec::Plain => raw,
+            Codec::Gzip => {
+                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                std::io::Write::write_all(&mut gz, &raw).unwrap();
+                gz.finish().unwrap()
+            }
+            Codec::Zstd => zstd::stream::encode_all(raw.as_slice(), 1).unwrap(),
         }
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        std::io::Write::write_all(&mut gz, &raw).unwrap();
-        gz.finish().unwrap()
     }
 
     #[test]
-    fn tar_and_tar_gz_extract_with_the_wrapper_stripped() {
-        for gzip in [false, true] {
+    fn every_tar_codec_extracts_with_the_wrapper_stripped() {
+        for codec in [Codec::Plain, Codec::Gzip, Codec::Zstd] {
             let tmp = tempfile::tempdir().unwrap();
             let archive = tmp.path().join("dist.tar");
             fs::write(
@@ -406,7 +421,7 @@ mod tests {
                         ("acme-lib-abc123/composer.json", b"{}"),
                         ("acme-lib-abc123/src/Lib.php", b"<?php"),
                     ],
-                    gzip,
+                    codec,
                 ),
             )
             .unwrap();
