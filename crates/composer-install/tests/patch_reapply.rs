@@ -40,11 +40,7 @@ fn install(
 ) -> eyre::Result<InstallSummary> {
     let fetcher = ReqwestFetcher::new().unwrap();
     let progress = NoProgress;
-    let env = InstallEnv {
-        fetcher: &fetcher,
-        progress: &progress,
-        cache_root,
-    };
+    let env = InstallEnv::new(&fetcher, &progress, cache_root);
     install_from_lock_with_patches(&env, project_root, opts, hooks, plan)
 }
 

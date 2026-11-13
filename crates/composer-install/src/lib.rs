@@ -5,13 +5,14 @@
 //! reproduces what `composer install` does to the filesystem:
 //!
 //! 1. verify the lock's content-hash (warn, never block, on drift);
-//! 2. preflight the lockfile (reject source-only and non-zip/tar dists; warn about
+//! 2. preflight the lockfile (reject unsupported dists and sources; warn about
 //!    Composer plugins and unrun `scripts`);
 //! 3. diff against `vendor/composer/installed.json` to skip up-to-date
 //!    packages and sweep stale ones;
 //! 4. download + verify + extract each changed dist in parallel into
 //!    `vendor/<vendor>/<package>/`;
-//! 5. materialize `type: path` packages (symlink-or-copy);
+//! 5. check out git-source packages (with a [`SourceFetcher`]) and
+//!    materialize `type: path` packages (symlink-or-copy);
 //! 6. apply cweagans-style patches ([`composer_patches`]);
 //! 7. run the declarative install plugins — the Magento deploy and Laravel
 //!    discovery ([`composer_installers`]);
@@ -25,7 +26,7 @@
 //!
 //! # Seams
 //!
-//! Three app-specific concerns are injected so the crate carries no
+//! App-specific concerns are injected so the crate carries no
 //! HTTP-client, progress-rendering, or paths policy of its own:
 //!
 //! - [`Fetcher`] — the single HTTP GET that populates the dist cache.
@@ -34,6 +35,8 @@
 //! - [`Progress`] — per-package download/extract callbacks. [`NoProgress`] is
 //!   the silent default.
 //! - `cache_root` (on [`InstallEnv`]) — where dist archives are cached.
+//! - [`SourceFetcher`] — optional; installs packages locked to a git source.
+//!   [`GitSourceFetcher`] shells out to the system `git`.
 //!
 //! Root-script execution is opted in via [`ScriptHooks`]; pass `None` for the
 //! deterministic scripts-off behavior.
@@ -47,11 +50,7 @@
 //! # fn main() -> eyre::Result<()> {
 //! let fetcher = ReqwestFetcher::new()?;
 //! let progress = NoProgress;
-//! let env = InstallEnv {
-//!     fetcher: &fetcher,
-//!     progress: &progress,
-//!     cache_root: Path::new("/tmp/composer-dist-cache"),
-//! };
+//! let env = InstallEnv::new(&fetcher, &progress, Path::new("/tmp/composer-dist-cache"));
 //! let summary = install_from_lock(&env, Path::new("."), InstallOptions::default(), None)?;
 //! println!("installed {} package(s)", summary.packages_installed);
 //! # Ok(())
@@ -61,8 +60,10 @@
 pub mod archive;
 pub mod auth;
 pub mod downloader;
+pub mod error;
 pub mod fetch;
 pub mod progress;
+pub mod source;
 
 mod bin_proxy;
 mod orchestrate;
@@ -77,9 +78,11 @@ pub use auth::{
     read_auth_json, read_composer_auth_env, read_global_auth_json,
 };
 pub use downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
+pub use error::{InstallError, VcsFailure};
 pub use fetch::{FetchSpec, Fetcher, ReqwestFetcher};
 pub use orchestrate::{
     InstallEnv, InstallOptions, InstallSummary, LinkMode, ScriptHooks, install_from_lock,
     install_from_lock_with_patches,
 };
 pub use progress::{NoProgress, Progress};
+pub use source::{GitSourceFetcher, SourceFetcher, SourceSpec};
