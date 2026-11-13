@@ -120,6 +120,7 @@ pub fn fetch_and_extract_dists(
 ) -> Result<Vec<DistOutcome>> {
     std::fs::create_dir_all(cache_root)
         .wrap_err_with(|| format!("creating {}", cache_root.display()))?;
+    progress.on_start(dists.len());
 
     let outcomes: Vec<DistOutcome> = dists
         .par_iter()

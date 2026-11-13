@@ -14,6 +14,13 @@ use crate::downloader::DistOutcome;
 /// Called from a rayon parallel iterator, so implementations must be `Sync`
 /// and cheap/non-blocking.
 pub trait Progress: Sync {
+    /// The downloader is about to fetch `dists` archives (cache hits
+    /// included). Fires once, before any other callback, so a bar can set its
+    /// length.
+    fn on_start(&self, dists: usize) {
+        let _ = dists;
+    }
+
     /// One dist finished its download phase — either freshly fetched or a
     /// cache hit (see [`DistOutcome`]). Fires once per package.
     fn on_download(&self, package: &str, outcome: DistOutcome) {
