@@ -5,7 +5,7 @@
 //! reproduces what `composer install` does to the filesystem:
 //!
 //! 1. verify the lock's content-hash (warn, never block, on drift);
-//! 2. preflight the lockfile (reject source-only / non-zip dists; warn about
+//! 2. preflight the lockfile (reject source-only and non-zip/tar dists; warn about
 //!    Composer plugins and unrun `scripts`);
 //! 3. diff against `vendor/composer/installed.json` to skip up-to-date
 //!    packages and sweep stale ones;
@@ -69,7 +69,9 @@ mod orchestrate;
 mod path_link;
 mod stale;
 
-pub use archive::{detect_zip_top_level, extract_zip};
+pub use archive::{
+    ArchiveKind, detect_tar_top_level, detect_zip_top_level, extract_dist, extract_tar, extract_zip,
+};
 pub use auth::{
     AuthCredentials, parse_composer_auth_env, read_all_auth, read_auth_from_composer_json,
     read_auth_json, read_composer_auth_env, read_global_auth_json,

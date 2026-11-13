@@ -31,6 +31,7 @@ use composer_patches::{ApplyOptions, FailureMode, MaterializedPatch, PatchPlan, 
 use eyre::{Context, Result, eyre};
 use serde_json::Value;
 
+use crate::archive::ArchiveKind;
 use crate::auth::{AuthCredentials, read_all_auth};
 use crate::downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
 use crate::fetch::Fetcher;
@@ -411,6 +412,8 @@ pub fn install_from_lock_with_patches(
                 sha1: dist.shasum.as_deref().unwrap_or(""),
                 reference: dist.reference.as_deref().unwrap_or(""),
                 strip_prefix: None,
+                // Preflight rejected every other dist type.
+                archive: ArchiveKind::from_dist_type(&dist.kind).unwrap_or(ArchiveKind::Zip),
                 vendor_dest: dest,
                 auth_header: primary.auth_header.as_deref(),
                 auth_header_name: primary.auth_header_name,
@@ -1117,10 +1120,10 @@ fn preflight(
             ));
             continue;
         };
-        if dist.kind != "zip" {
+        if ArchiveKind::from_dist_type(&dist.kind).is_none() {
             reasons.push(format!(
-                "package `{}` uses dist type `{}`; this installer currently supports only \
-                 zip dists — run a full `composer install`.",
+                "package `{}` uses dist type `{}`; this installer handles only `zip` and \
+                 `tar` dists — run a full `composer install`.",
                 p.name, dist.kind,
             ));
         }
