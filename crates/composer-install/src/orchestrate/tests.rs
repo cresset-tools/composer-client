@@ -459,8 +459,15 @@ fn tar_dist_kind_passes_preflight() {
     std::fs::write(&lock_path, &lock_json).unwrap();
     let lock = Lock::read(&lock_path).unwrap();
 
-    let warnings = preflight(MINIMAL_COMPOSER_JSON.as_bytes(), &lock, false, false, false)
-        .expect("tar dist must pass preflight");
+    let warnings = preflight(
+        MINIMAL_COMPOSER_JSON.as_bytes(),
+        &lock,
+        false,
+        false,
+        false,
+        &Wording::default(),
+    )
+    .expect("tar dist must pass preflight");
     assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
 }
 
@@ -1130,4 +1137,44 @@ fn laravel_drift_guard_skipped_when_scripts_on() {
     run(&cache_root, &proj, InstallOptions::default(), Some(&hooks))
         .expect("scripts-on must skip the drift guard");
     assert!(hooks.events.into_inner().contains(&"post_autoload_dump"));
+}
+
+#[test]
+fn wording_names_the_calling_tool_in_warnings_and_blockers() {
+    let wording = Wording {
+        tool: "acme",
+        update_command: "acme update",
+        install_command: "acme run -- composer install",
+        scripts_hint: "Pass `--scripts` to run them.",
+        ..Wording::default()
+    };
+
+    // Scripts declared and not run: the hint is the caller's.
+    let lock: Lock = serde_json::from_str(r#"{ "packages": [], "packages-dev": [] }"#).unwrap();
+    let json = br#"{ "name": "acme/app", "scripts": { "post-install-cmd": "echo hi" } }"#;
+    let warnings = preflight(json, &lock, false, false, false, &wording).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].ends_with("Pass `--scripts` to run them."));
+    assert!(!warnings[0].contains("ScriptHooks"));
+
+    // A stale lock points at the caller's update command.
+    let stale: Lock =
+        serde_json::from_str(r#"{ "content-hash": "0000", "packages": [], "packages-dev": [] }"#)
+            .unwrap();
+    let warning = content_hash_warning(json, &stale, &wording)
+        .unwrap()
+        .expect("a stale lock warns");
+    assert!(warning.contains("Run `acme update`"), "{warning}");
+
+    // A blocker names the tool and its escape hatch.
+    let svn: Lock = serde_json::from_str(
+        r#"{ "packages": [ { "name": "acme/lib", "version": "1.0.0",
+             "source": { "type": "svn", "url": "https://svn.example/lib", "reference": "1" } } ],
+             "packages-dev": [] }"#,
+    )
+    .unwrap();
+    let err = preflight(b"{}", &svn, false, false, true, &wording).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("acme can only install git sources"), "{msg}");
+    assert!(msg.contains("`acme run -- composer install`"), "{msg}");
 }
