@@ -128,12 +128,35 @@ pub fn read_all_auth(
     composer_json: &Value,
     project_root: &Path,
 ) -> Result<HashMap<String, AuthCredentials>> {
+    read_all_auth_with::<std::hash::RandomState>(composer_json, project_root, None)
+}
+
+/// [`read_all_auth`], plus `machine` credentials from a caller's own store.
+/// They sit in the machine-wide slot: above the global `auth.json` (they win
+/// for the same host) and below every project source.
+pub fn read_all_auth_with<S: std::hash::BuildHasher>(
+    composer_json: &Value,
+    project_root: &Path,
+    machine: Option<&HashMap<String, AuthCredentials, S>>,
+) -> Result<HashMap<String, AuthCredentials>> {
     Ok(merge_auth_sources(
-        read_global_auth_json()?,
+        machine_slot(read_global_auth_json()?, machine),
         read_auth_from_composer_json(composer_json)?,
         read_auth_json(project_root)?,
         read_composer_auth_env()?,
     ))
+}
+
+/// The machine-wide slot: the global `auth.json`, with the caller's own
+/// store winning for the same host.
+fn machine_slot<S: std::hash::BuildHasher>(
+    mut global: HashMap<String, AuthCredentials>,
+    machine: Option<&HashMap<String, AuthCredentials, S>>,
+) -> HashMap<String, AuthCredentials> {
+    if let Some(machine) = machine {
+        global.extend(machine.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    global
 }
 
 /// Pure merger so the precedence order can be unit-tested without env-var or
@@ -194,5 +217,31 @@ mod tests {
             Some(AuthCredentials::Bearer { token }) => assert_eq!(token, "new"),
             other => panic!("expected the env token to win, got {other:?}"),
         }
+    }
+
+    fn bearer(token: &str) -> HashMap<String, AuthCredentials> {
+        HashMap::from([(
+            "h".to_string(),
+            AuthCredentials::Bearer {
+                token: token.into(),
+            },
+        )])
+    }
+
+    fn token_for_h(map: &HashMap<String, AuthCredentials>) -> &str {
+        match map.get("h") {
+            Some(AuthCredentials::Bearer { token }) => token,
+            other => panic!("expected a bearer token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_store_beats_global_auth_json_but_not_the_project() {
+        let store = bearer("store");
+        let slot = machine_slot(bearer("global"), Some(&store));
+        assert_eq!(token_for_h(&slot), "store");
+
+        let merged = merge_auth_sources(slot, bearer("config"), HashMap::new(), HashMap::new());
+        assert_eq!(token_for_h(&merged), "config");
     }
 }

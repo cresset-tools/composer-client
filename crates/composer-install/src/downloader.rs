@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use sha1::Digest as _;
 
 use crate::LinkMode;
-use crate::archive::{detect_zip_top_level, extract_zip};
+use crate::archive::{ArchiveKind, extract_dist};
 use crate::fetch::{FetchSpec, Fetcher};
 use crate::progress::Progress;
 
@@ -53,9 +53,11 @@ pub struct DistRequest<'a> {
     /// Top-level directory inside the archive to strip — e.g.
     /// `monolog-monolog-1234567`. `None` (the default for `composer.lock`-
     /// driven callers) means auto-detect from the cached archive's central
-    /// directory via [`detect_zip_top_level`]; pass `Some` only when the
-    /// caller already knows the wrapper name.
+    /// directory; pass `Some` only when the caller already knows the wrapper
+    /// name.
     pub strip_prefix: Option<&'a str>,
+    /// The archive format, from the lock's `dist.type`.
+    pub archive: ArchiveKind,
     /// Where the extracted tree should live — typically
     /// `<project>/vendor/<vendor>/<package>/`. Any existing contents are
     /// replaced by the extractor.
@@ -122,7 +124,7 @@ pub fn fetch_and_extract_dists(
     let outcomes: Vec<DistOutcome> = dists
         .par_iter()
         .map(|d| {
-            let outcome = download_to_cache(fetcher, cache_root, d)?;
+            let outcome = download_to_cache(fetcher, cache_root, d, progress)?;
             progress.on_download(d.package_name, outcome);
             Ok(outcome)
         })
@@ -145,6 +147,7 @@ fn download_to_cache(
     fetcher: &dyn Fetcher,
     cache_root: &Path,
     dist: &DistRequest<'_>,
+    progress: &dyn Progress,
 ) -> Result<DistOutcome> {
     let cache_path = cache_path_for(cache_root, dist);
     if cache_path.exists() {
@@ -166,14 +169,11 @@ fn download_to_cache(
     let mut last_err: Option<eyre::Report> = None;
     for (idx, (url, auth_header, auth_header_name)) in candidates.enumerate() {
         let url = rewrite_github_dist_url(url);
-        let spec = FetchSpec {
-            url: &url,
-            sha1: dist.sha1,
-            dest: &cache_path,
-            partial_dir: cache_root,
-            auth_header,
-            auth_header_name,
-        };
+        let mut spec = FetchSpec::new(&url, dist.sha1, &cache_path, cache_root);
+        spec.package_name = dist.package_name;
+        spec.auth_header = auth_header;
+        spec.auth_header_name = auth_header_name;
+        spec.progress = progress;
         match fetcher.fetch(&spec) {
             Ok(()) => {
                 return Ok(DistOutcome::Downloaded {
@@ -319,20 +319,13 @@ fn extract_from_cache(cache_root: &Path, dist: &DistRequest<'_>) -> Result<()> {
     let _ = std::fs::remove_dir_all(dist.vendor_dest);
     std::fs::create_dir_all(dist.vendor_dest)
         .wrap_err_with(|| format!("creating {}", dist.vendor_dest.display()))?;
-    let detected: String;
-    let strip = if let Some(s) = dist.strip_prefix {
-        s
-    } else {
-        detected = detect_zip_top_level(&cache_path).wrap_err_with(|| {
-            format!(
-                "detecting top-level dir in dist for {} ({})",
-                dist.package_name,
-                cache_path.display(),
-            )
-        })?;
-        detected.as_str()
-    };
-    extract_zip(&cache_path, dist.vendor_dest, strip).wrap_err_with(|| {
+    extract_dist(
+        dist.archive,
+        &cache_path,
+        dist.vendor_dest,
+        dist.strip_prefix,
+    )
+    .wrap_err_with(|| {
         format!(
             "extracting dist for {} ({} → {})",
             dist.package_name,
@@ -377,7 +370,7 @@ fn cache_key(dist: &DistRequest<'_>) -> String {
 /// `<cache_root>/<key>.zip`. The extension is for human-readable cache listings
 /// only; lookup is keyed on [`cache_key`].
 fn cache_path_for(cache_root: &Path, dist: &DistRequest<'_>) -> PathBuf {
-    cache_root.join(format!("{}.zip", cache_key(dist)))
+    cache_root.join(format!("{}.{}", cache_key(dist), dist.archive.extension()))
 }
 
 /// [`LinkMode::Hardlink`] materialization: decompress the cached zip ONCE into a
@@ -408,27 +401,16 @@ fn install_from_store(cache_root: &Path, dist: &DistRequest<'_>) -> Result<()> {
         let _ = std::fs::remove_dir_all(&store_dir);
         std::fs::create_dir_all(&store_dir)
             .wrap_err_with(|| format!("creating store {}", store_dir.display()))?;
-        let detected: String;
-        let strip = if let Some(s) = dist.strip_prefix {
-            s
-        } else {
-            detected = detect_zip_top_level(&cache_path).wrap_err_with(|| {
+        extract_dist(dist.archive, &cache_path, &store_dir, dist.strip_prefix).wrap_err_with(
+            || {
                 format!(
-                    "detecting top-level dir in dist for {} ({})",
+                    "extracting dist for {} into store ({} → {})",
                     dist.package_name,
                     cache_path.display(),
+                    store_dir.display(),
                 )
-            })?;
-            detected.as_str()
-        };
-        extract_zip(&cache_path, &store_dir, strip).wrap_err_with(|| {
-            format!(
-                "extracting dist for {} into store ({} → {})",
-                dist.package_name,
-                cache_path.display(),
-                store_dir.display(),
-            )
-        })?;
+            },
+        )?;
         std::fs::write(&marker, [])
             .wrap_err_with(|| format!("writing store marker {}", marker.display()))?;
     }
