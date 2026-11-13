@@ -183,6 +183,75 @@ fn downloads_tar_dist_and_extracts_with_detected_prefix() {
     }
 }
 
+#[derive(Default)]
+struct RecordRetries(std::sync::Mutex<Vec<(String, u32)>>);
+
+impl Progress for RecordRetries {
+    fn on_retry(&self, package: &str, attempt: u32, _error: &eyre::Report) {
+        self.0.lock().unwrap().push((package.to_owned(), attempt));
+    }
+}
+
+#[test]
+fn a_retried_fetch_is_reported_to_progress() {
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let vendor_dest = tmp.path().join("vendor/acme/foo");
+    let body = build_fixture_zip("acme-foo-abc1234");
+    let hash = sha1_hex(&body);
+
+    let rt = rt();
+    let (uri, _server) = rt.block_on(async {
+        let server = MockServer::start().await;
+        // The first request fails, the retry succeeds.
+        Mock::given(method("GET"))
+            .and(wm_path("/dists/acme-foo.zip"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wm_path("/dists/acme-foo.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        (uri, server)
+    });
+
+    let url = format!("{uri}/dists/acme-foo.zip");
+    let dists = [DistRequest {
+        package_name: "acme/foo",
+        url: &url,
+        sha1: &hash,
+        reference: "",
+        strip_prefix: None,
+        archive: ArchiveKind::Zip,
+        vendor_dest: &vendor_dest,
+        auth_header: None,
+        auth_header_name: None,
+        project_root: tmp.path(),
+        fallbacks: &[],
+    }];
+    let progress = RecordRetries::default();
+    fetch_and_extract_dists(
+        &fetcher(),
+        &cache_root,
+        &dists,
+        &progress,
+        LinkMode::Extract,
+    )
+    .unwrap();
+
+    assert!(vendor_dest.join("composer.json").is_file());
+    assert_eq!(
+        *progress.0.lock().unwrap(),
+        vec![("acme/foo".to_owned(), 1)]
+    );
+}
+
 #[test]
 fn falls_back_to_next_candidate_when_primary_url_fails() {
     // Composer's dist-mirror semantics: a 404 from the first candidate must not

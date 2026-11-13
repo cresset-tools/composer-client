@@ -25,6 +25,14 @@ pub trait Progress: Sync {
     fn on_extract(&self, package: &str) {
         let _ = package;
     }
+
+    /// A fetch attempt for `package` failed and is about to be retried.
+    /// `attempt` counts the failures so far (1 on the first retry). Fired by
+    /// fetchers that retry, such as [`crate::ReqwestFetcher`]; a final
+    /// failure is returned as an error instead.
+    fn on_retry(&self, package: &str, attempt: u32, error: &eyre::Report) {
+        let _ = (package, attempt, error);
+    }
 }
 
 /// The silent default: reports nothing. Suitable for library use and for the

@@ -32,8 +32,9 @@ use eyre::{Context, Result, eyre};
 use serde_json::Value;
 
 use crate::archive::ArchiveKind;
-use crate::auth::{AuthCredentials, read_all_auth};
+use crate::auth::{AuthCredentials, read_all_auth_with};
 use crate::downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
+use crate::error::InstallError;
 use crate::fetch::Fetcher;
 use crate::progress::Progress;
 use crate::source::{SourceFetcher, SourceSpec, materialize_sources};
@@ -58,6 +59,14 @@ pub struct InstallEnv<'a> {
     /// Installs packages the lock pins to a git `source` with no dist. `None`
     /// (the default) makes such packages a preflight error.
     pub source_fetcher: Option<&'a dyn SourceFetcher>,
+    /// Machine-wide credentials from the caller's own store (a CLI's login
+    /// command, say), merged above the global `auth.json` and below the
+    /// project's sources: composer.json `config`, project `auth.json` and
+    /// `COMPOSER_AUTH` still win.
+    pub machine_auth: Option<&'a HashMap<String, AuthCredentials>>,
+    /// File name, under `vendor/composer/`, of the autoloader freshness
+    /// marker. Defaults to `.composer-install-autoload-fresh`.
+    pub autoload_marker: &'a str,
 }
 
 impl<'a> InstallEnv<'a> {
@@ -70,7 +79,25 @@ impl<'a> InstallEnv<'a> {
             progress,
             cache_root,
             source_fetcher: None,
+            machine_auth: None,
+            autoload_marker: AUTOLOAD_FRESH_MARKER,
         }
+    }
+
+    /// Add machine-wide credentials from the caller's own store; see
+    /// [`machine_auth`](Self::machine_auth) for the precedence.
+    #[must_use]
+    pub fn with_machine_auth(mut self, auth: &'a HashMap<String, AuthCredentials>) -> Self {
+        self.machine_auth = Some(auth);
+        self
+    }
+
+    /// Use another file name for the autoloader freshness marker, so a tool
+    /// that already writes its own keeps its warm state.
+    #[must_use]
+    pub fn with_autoload_marker(mut self, name: &'a str) -> Self {
+        self.autoload_marker = name;
+        self
     }
 
     /// Install git-source packages with `source_fetcher` — typically a
@@ -87,6 +114,8 @@ impl std::fmt::Debug for InstallEnv<'_> {
         f.debug_struct("InstallEnv")
             .field("cache_root", &self.cache_root)
             .field("source_fetcher", &self.source_fetcher.is_some())
+            .field("machine_auth", &self.machine_auth.map(HashMap::len))
+            .field("autoload_marker", &self.autoload_marker)
             .finish_non_exhaustive()
     }
 }
@@ -228,19 +257,27 @@ pub fn install_from_lock_with_patches(
 ) -> Result<InstallSummary> {
     let composer_json_path = project_root.join("composer.json");
     let composer_lock_path = project_root.join("composer.lock");
-    let composer_json_bytes = std::fs::read(&composer_json_path).wrap_err_with(|| {
-        format!(
-            "{} not found — not a Composer project",
-            composer_json_path.display()
-        )
-    })?;
+    let composer_json_bytes = match std::fs::read(&composer_json_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(InstallError::MissingManifest {
+                path: composer_json_path,
+            }
+            .into());
+        }
+        Err(e) => {
+            return Err(
+                eyre::Report::new(e).wrap_err(format!("reading {}", composer_json_path.display()))
+            );
+        }
+    };
     let lock = if composer_lock_path.exists() {
         Lock::read(&composer_lock_path)?
     } else {
-        return Err(eyre!(
-            "{} not found — run `composer update` first to generate it",
-            composer_lock_path.display()
-        ));
+        return Err(InstallError::MissingLock {
+            path: composer_lock_path,
+        }
+        .into());
     };
 
     // A stale lock (content-hash mismatch) warns rather than blocks — same as
@@ -260,9 +297,14 @@ pub fn install_from_lock_with_patches(
     // and the `COMPOSER_AUTH` env var. Dist URLs sitting behind the same auth
     // as the metadata (Magento's `/archives/…`, private satis, GitLab CI
     // Composer ZIPs) need the header; public-CDN dists from Packagist do not.
-    let composer_json_value: Value = serde_json::from_slice(&composer_json_bytes)
-        .map_err(|e| eyre!("parsing composer.json: {e}"))?;
-    let auth: HashMap<String, AuthCredentials> = read_all_auth(&composer_json_value, project_root)?;
+    let composer_json_value: Value = serde_json::from_slice(&composer_json_bytes).map_err(|e| {
+        InstallError::InvalidManifest {
+            path: composer_json_path.clone(),
+            detail: e.to_string(),
+        }
+    })?;
+    let auth: HashMap<String, AuthCredentials> =
+        read_all_auth_with(&composer_json_value, project_root, env.machine_auth)?;
 
     // `pre-install-cmd` / `pre-update-cmd` — before any package operation
     // (download/extract). Only when the user opted into root scripts.
@@ -558,7 +600,7 @@ pub fn install_from_lock_with_patches(
     // observable exactly as before.
     let autoload_marker = project_root
         .join("vendor/composer")
-        .join(AUTOLOAD_FRESH_MARKER);
+        .join(env.autoload_marker);
     let lock_bytes = std::fs::read(&composer_lock_path).unwrap_or_default();
     let fingerprint =
         autoload_fingerprint(&composer_json_bytes, &lock_bytes, opts.no_dev).to_string();
@@ -1074,7 +1116,7 @@ fn dist_up_to_date(p: &LockPackage, state: &InstalledState, project_root: &Path)
 /// Marker file (under `vendor/composer/`) holding the autoloader freshness
 /// fingerprint from the last dump. Its presence + match lets a subsequent
 /// unchanged sync skip the autoloader regeneration.
-const AUTOLOAD_FRESH_MARKER: &str = ".composer-install-autoload-fresh";
+pub(crate) const AUTOLOAD_FRESH_MARKER: &str = ".composer-install-autoload-fresh";
 
 /// Fingerprint of everything the non-optimized autoloader output depends on:
 /// the root manifest bytes (autoload / config / installer-paths in `extra`) and
@@ -1255,14 +1297,7 @@ fn preflight(
     if reasons.is_empty() {
         Ok(warnings)
     } else {
-        let bullets = reasons
-            .iter()
-            .map(|r| format!("  - {r}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Err(eyre!(
-            "this lockfile requires features this installer does not handle:\n{bullets}",
-        ))
+        Err(InstallError::Unsupported { reasons }.into())
     }
 }
 

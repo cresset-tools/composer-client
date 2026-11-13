@@ -74,8 +74,8 @@ pub use archive::{
     ArchiveKind, detect_tar_top_level, detect_zip_top_level, extract_dist, extract_tar, extract_zip,
 };
 pub use auth::{
-    AuthCredentials, parse_composer_auth_env, read_all_auth, read_auth_from_composer_json,
-    read_auth_json, read_composer_auth_env, read_global_auth_json,
+    AuthCredentials, parse_composer_auth_env, read_all_auth, read_all_auth_with,
+    read_auth_from_composer_json, read_auth_json, read_composer_auth_env, read_global_auth_json,
 };
 pub use downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
 pub use error::{InstallError, VcsFailure};

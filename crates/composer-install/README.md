@@ -36,12 +36,18 @@ progress-rendering, or paths policy of its own:
 - **`Fetcher`** — the single HTTP GET that populates the dist cache. `ReqwestFetcher` is the
   batteries-included default (Composer `User-Agent`, sha1 verify, atomic placement, bounded
   retry). Bring your own to reuse a client, inject a proxy, or serve from a pre-seeded store.
-- **`Progress`** — per-package download / extract callbacks. `NoProgress` is the silent
-  default; a CLI implements the trait to drive a progress bar.
+- **`Progress`** — per-package download / extract / retry callbacks. `NoProgress` is the
+  silent default; a CLI implements the trait to drive a progress bar.
 - **`cache_root`** (on `InstallEnv`) — where dist archives are cached across runs.
 - **`SourceFetcher`** — optional; installs packages the lock pins to a git `source` with no
   dist. `GitSourceFetcher` shells out to the system `git` and caches bare mirrors. Without
   one, such packages fail preflight.
+- **Machine credentials** (`InstallEnv::with_machine_auth`) — a tool's own credential
+  store, merged above the global `auth.json` and below every project source.
+
+Failures a caller may want to map to its own exit codes (a missing `composer.json` or
+`composer.lock`, an invalid manifest, an unsupported lock, a git failure) carry an
+`InstallError` you can recover with `report.downcast_ref::<InstallError>()`.
 
 Root-script execution is opted in via the caller-supplied `ScriptHooks` trait; pass `None`
 for deterministic scripts-off behavior.

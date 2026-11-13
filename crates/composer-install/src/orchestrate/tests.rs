@@ -335,6 +335,67 @@ fn plugin_package_dist_is_checked_in_preflight() {
 }
 
 #[test]
+fn missing_files_and_unsupported_locks_are_typed_errors() {
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+
+    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<InstallError>(),
+        Some(InstallError::MissingManifest { .. })
+    ));
+
+    std::fs::write(proj.join("composer.json"), MINIMAL_COMPOSER_JSON).unwrap();
+    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<InstallError>(),
+        Some(InstallError::MissingLock { .. })
+    ));
+
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock = format!(
+        r#"{{
+            "content-hash": "{hash}",
+            "packages": [
+                {{ "name": "acme/a", "version": "1.0.0",
+                   "dist": {{ "type": "xz", "url": "https://example/a.xz" }} }},
+                {{ "name": "acme/b", "version": "1.0.0",
+                   "source": {{ "type": "hg", "url": "https://example/b", "reference": "1" }} }}
+            ],
+            "packages-dev": []
+        }}"#
+    );
+    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
+    let err = run(&cache_root, &proj, InstallOptions::default(), None).unwrap_err();
+    match err.downcast_ref::<InstallError>() {
+        Some(InstallError::Unsupported { reasons }) => assert_eq!(reasons.len(), 2, "{reasons:?}"),
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_autoload_marker_name_is_configurable() {
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock = format!(r#"{{ "content-hash": "{hash}", "packages": [], "packages-dev": [] }}"#);
+    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
+
+    let fetcher = ReqwestFetcher::new().unwrap();
+    let env = InstallEnv::new(&fetcher, &NoProgress, &cache_root)
+        .with_autoload_marker(".my-tool-autoload-fresh");
+    install_from_lock(&env, &proj, InstallOptions::default(), None).unwrap();
+
+    let composer_dir = proj.join("vendor/composer");
+    assert!(composer_dir.join(".my-tool-autoload-fresh").is_file());
+    assert!(!composer_dir.join(AUTOLOAD_FRESH_MARKER).exists());
+}
+
+#[test]
 fn unsupported_dist_kind_is_rejected() {
     // A dist type the installer can't extract (e.g. `xz`) is a hard blocker.
     let tmp = TempDir::new().unwrap();

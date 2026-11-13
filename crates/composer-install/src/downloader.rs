@@ -124,7 +124,7 @@ pub fn fetch_and_extract_dists(
     let outcomes: Vec<DistOutcome> = dists
         .par_iter()
         .map(|d| {
-            let outcome = download_to_cache(fetcher, cache_root, d)?;
+            let outcome = download_to_cache(fetcher, cache_root, d, progress)?;
             progress.on_download(d.package_name, outcome);
             Ok(outcome)
         })
@@ -147,6 +147,7 @@ fn download_to_cache(
     fetcher: &dyn Fetcher,
     cache_root: &Path,
     dist: &DistRequest<'_>,
+    progress: &dyn Progress,
 ) -> Result<DistOutcome> {
     let cache_path = cache_path_for(cache_root, dist);
     if cache_path.exists() {
@@ -168,14 +169,11 @@ fn download_to_cache(
     let mut last_err: Option<eyre::Report> = None;
     for (idx, (url, auth_header, auth_header_name)) in candidates.enumerate() {
         let url = rewrite_github_dist_url(url);
-        let spec = FetchSpec {
-            url: &url,
-            sha1: dist.sha1,
-            dest: &cache_path,
-            partial_dir: cache_root,
-            auth_header,
-            auth_header_name,
-        };
+        let mut spec = FetchSpec::new(&url, dist.sha1, &cache_path, cache_root);
+        spec.package_name = dist.package_name;
+        spec.auth_header = auth_header;
+        spec.auth_header_name = auth_header_name;
+        spec.progress = progress;
         match fetcher.fetch(&spec) {
             Ok(()) => {
                 return Ok(DistOutcome::Downloaded {

@@ -6,11 +6,36 @@
 //! `report.chain()`) and mapped to an exit code or a tool-specific hint.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// An install failure a caller can match on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InstallError {
+    /// The project has no `composer.json`.
+    MissingManifest {
+        /// The path that was looked for.
+        path: PathBuf,
+    },
+    /// The project has a `composer.json` but no `composer.lock`.
+    MissingLock {
+        /// The path that was looked for.
+        path: PathBuf,
+    },
+    /// `composer.json` is not valid JSON.
+    InvalidManifest {
+        /// The manifest's path.
+        path: PathBuf,
+        /// The parser's message.
+        detail: String,
+    },
+    /// The lock needs features this installer does not handle (an
+    /// unsupported dist type, a non-git source, …). Every blocker is listed,
+    /// so the user can fix them in one pass.
+    Unsupported {
+        /// One human-readable reason per blocking package.
+        reasons: Vec<String>,
+    },
     /// A `git` command failed while installing a source package.
     Vcs {
         /// What kind of failure, classified from git's stderr.
@@ -67,6 +92,27 @@ impl VcsFailure {
 impl fmt::Display for InstallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingManifest { path } => {
+                write!(f, "{} not found — not a Composer project", path.display())
+            }
+            Self::MissingLock { path } => write!(
+                f,
+                "{} not found — run `composer update` first to generate it",
+                path.display()
+            ),
+            Self::InvalidManifest { path, detail } => {
+                write!(f, "parsing {}: {detail}", path.display())
+            }
+            Self::Unsupported { reasons } => {
+                write!(
+                    f,
+                    "this lockfile requires features this installer does not handle:"
+                )?;
+                for r in reasons {
+                    write!(f, "\n  - {r}")?;
+                }
+                Ok(())
+            }
             Self::Vcs {
                 failure,
                 operation,
