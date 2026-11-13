@@ -26,12 +26,17 @@ fn run(
 ) -> Result<InstallSummary> {
     let fetcher = ReqwestFetcher::new().unwrap();
     let progress = NoProgress;
-    let env = InstallEnv {
-        fetcher: &fetcher,
-        progress: &progress,
-        cache_root,
-    };
+    let env = InstallEnv::new(&fetcher, &progress, cache_root);
     install_from_lock(&env, proj, opts, hooks)
+}
+
+/// Like [`run`], with git-source installs enabled (mirrors beside the cache).
+fn run_with_git(cache_root: &Path, proj: &Path) -> Result<InstallSummary> {
+    let fetcher = ReqwestFetcher::new().unwrap();
+    let progress = NoProgress;
+    let git = crate::GitSourceFetcher::new(cache_root.with_file_name("vcs"));
+    let env = InstallEnv::new(&fetcher, &progress, cache_root).with_source_fetcher(&git);
+    install_from_lock(&env, proj, InstallOptions::default(), None)
 }
 
 /// Write `composer.json` + `composer.lock` to `dir` with the given bytes.
@@ -218,7 +223,79 @@ fn source_only_package_is_rejected_in_preflight() {
         .expect_err("must reject source-only package");
     let msg = format!("{err:#}");
     assert!(msg.contains("acme/sourceonly"), "{msg}");
-    assert!(msg.contains("source-only"), "{msg}");
+    assert!(msg.contains("not enabled"), "{msg}");
+}
+
+#[test]
+fn non_git_source_is_rejected_in_preflight() {
+    // With git installs on, a non-git source (svn/hg) is still a hard
+    // blocker, rejected before any clone.
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock = format!(
+        r#"{{
+            "content-hash": "{hash}",
+            "packages": [
+                {{
+                    "name": "acme/sourceonly",
+                    "version": "1.0.0",
+                    "source": {{
+                        "type": "svn",
+                        "url": "https://svn.example/acme/sourceonly",
+                        "reference": "42"
+                    }}
+                }}
+            ],
+            "packages-dev": []
+        }}"#
+    );
+    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
+
+    let err = run_with_git(&cache_root, &proj).expect_err("must reject non-git source");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("acme/sourceonly"), "{msg}");
+    assert!(msg.contains("`svn` source"), "{msg}");
+    assert!(msg.contains("git sources"), "{msg}");
+}
+
+#[cfg(unix)]
+#[test]
+fn git_source_package_installs_from_lock() {
+    // A package with only a git `source` is cloned and checked out into
+    // vendor/, and a second install with the same lock is a no-op.
+    let tmp = TempDir::new().unwrap();
+    let cache_root = cache_in(tmp.path());
+    let (url, _first, sha) = crate::source::tests::fixture_repo(tmp.path());
+
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock = format!(
+        r#"{{
+            "content-hash": "{hash}",
+            "packages": [
+                {{
+                    "name": "acme/lib",
+                    "version": "1.0.0",
+                    "source": {{ "type": "git", "url": "{url}", "reference": "{sha}" }},
+                    "autoload": {{ "classmap": ["."] }}
+                }}
+            ],
+            "packages-dev": []
+        }}"#
+    );
+    write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
+
+    let summary = run_with_git(&cache_root, &proj).expect("git source install must succeed");
+    assert_eq!(summary.packages_installed, 1, "{summary:?}");
+    assert!(proj.join("vendor/acme/lib/second.php").is_file());
+    assert!(proj.join("vendor/autoload.php").is_file(), "autoloader ran");
+
+    let again = run_with_git(&cache_root, &proj).expect("re-install must succeed");
+    assert_eq!(again.packages_installed, 0, "up to date: {again:?}");
 }
 
 #[test]
@@ -254,11 +331,12 @@ fn plugin_package_dist_is_checked_in_preflight() {
         .expect_err("a plugin with no dist must be rejected up front");
     let msg = format!("{err:#}");
     assert!(msg.contains("acme/plugin"), "{msg}");
-    assert!(msg.contains("source-only"), "{msg}");
+    assert!(msg.contains("no `dist` block"), "{msg}");
 }
 
 #[test]
-fn tar_dist_kind_is_rejected() {
+fn unsupported_dist_kind_is_rejected() {
+    // A dist type the installer can't extract (e.g. `xz`) is a hard blocker.
     let tmp = TempDir::new().unwrap();
     let cache_root = cache_in(tmp.path());
     let proj = tmp.path().join("p");
@@ -269,11 +347,11 @@ fn tar_dist_kind_is_rejected() {
             "content-hash": "{hash}",
             "packages": [
                 {{
-                    "name": "acme/tar",
+                    "name": "acme/xz",
                     "version": "1.0.0",
                     "dist": {{
-                        "type": "tar",
-                        "url": "https://example/t.tar.gz",
+                        "type": "xz",
+                        "url": "https://example/t.tar.xz",
                         "shasum": "1111111111111111111111111111111111111111"
                     }}
                 }}
@@ -284,11 +362,45 @@ fn tar_dist_kind_is_rejected() {
     write_project(&proj, MINIMAL_COMPOSER_JSON, &lock);
 
     let err =
-        run(&cache_root, &proj, InstallOptions::default(), None).expect_err("must reject tar dist");
+        run(&cache_root, &proj, InstallOptions::default(), None).expect_err("must reject xz dist");
     let msg = format!("{err:#}");
-    assert!(msg.contains("acme/tar"), "{msg}");
-    assert!(msg.contains("`tar`"), "{msg}");
-    assert!(msg.contains("zip dists"), "{msg}");
+    assert!(msg.contains("acme/xz"), "{msg}");
+    assert!(msg.contains("`xz`"), "{msg}");
+    assert!(msg.contains("`zip` and `tar`"), "{msg}");
+}
+
+#[test]
+fn tar_dist_kind_passes_preflight() {
+    // A `tar` dist is extracted natively. Exercise `preflight` directly so no
+    // network fetch is needed.
+    let tmp = TempDir::new().unwrap();
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let hash = hash_for(MINIMAL_COMPOSER_JSON);
+    let lock_json = format!(
+        r#"{{
+            "content-hash": "{hash}",
+            "packages": [
+                {{
+                    "name": "mirasvit/module-email",
+                    "version": "1.0.0",
+                    "dist": {{
+                        "type": "tar",
+                        "url": "https://example/module-email.tar",
+                        "shasum": "1111111111111111111111111111111111111111"
+                    }}
+                }}
+            ],
+            "packages-dev": []
+        }}"#
+    );
+    let lock_path = proj.join("composer.lock");
+    std::fs::write(&lock_path, &lock_json).unwrap();
+    let lock = Lock::read(&lock_path).unwrap();
+
+    let warnings = preflight(MINIMAL_COMPOSER_JSON.as_bytes(), &lock, false, false, false)
+        .expect("tar dist must pass preflight");
+    assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
 }
 
 #[test]
@@ -349,11 +461,11 @@ fn preflight_reports_all_hard_blockers_together() {
                     }}
                 }},
                 {{
-                    "name": "acme/tar",
+                    "name": "acme/xz",
                     "version": "1.0.0",
                     "dist": {{
-                        "type": "tar",
-                        "url": "https://example/t.tar.gz",
+                        "type": "xz",
+                        "url": "https://example/t.tar.xz",
                         "shasum": "2222222222222222222222222222222222222222"
                     }}
                 }},
@@ -375,7 +487,7 @@ fn preflight_reports_all_hard_blockers_together() {
     let err = run(&cache_root, &proj, InstallOptions::default(), None)
         .expect_err("hard blockers must still fail install");
     let msg = format!("{err:#}");
-    assert!(msg.contains("acme/tar"), "tar: {msg}");
+    assert!(msg.contains("acme/xz"), "xz: {msg}");
     assert!(msg.contains("acme/sourceonly"), "sourceonly: {msg}");
 }
 

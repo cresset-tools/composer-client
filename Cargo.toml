@@ -76,6 +76,9 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # Composer dist archives are zip; `deflate` is the only codec Packagist emits.
 zip = { version = "8.0", default-features = false, features = ["deflate"] }
+# `type: tar` dists: plain or gzip-compressed tarballs.
+tar = "0.4"
+flate2 = "1.1"
 # Composer's dist `shasum` field is legacy sha1.
 sha1 = "0.10"
 # Dev-only: mock HTTP server + a current-thread runtime to drive it from the

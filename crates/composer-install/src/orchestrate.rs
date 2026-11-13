@@ -31,16 +31,20 @@ use composer_patches::{ApplyOptions, FailureMode, MaterializedPatch, PatchPlan, 
 use eyre::{Context, Result, eyre};
 use serde_json::Value;
 
+use crate::archive::ArchiveKind;
 use crate::auth::{AuthCredentials, read_all_auth};
 use crate::downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_dists};
 use crate::fetch::Fetcher;
 use crate::progress::Progress;
+use crate::source::{SourceFetcher, SourceSpec, materialize_sources};
 use crate::stale::{InstallRecord, remove_stale_packages};
 
 /// The runtime seams an install needs, injected so the crate stays free of any
-/// HTTP-client / progress-bar / paths policy. Construct it once and pass by
-/// reference to [`install_from_lock`].
+/// HTTP-client / progress-bar / paths policy. Build it with
+/// [`InstallEnv::new`] plus the `with_*` methods, and pass it by reference to
+/// [`install_from_lock`].
 #[derive(Clone, Copy)]
+#[non_exhaustive]
 pub struct InstallEnv<'a> {
     /// Downloads each dist URL to a verified cache file. Use
     /// [`crate::ReqwestFetcher`] for the batteries-included default.
@@ -51,12 +55,38 @@ pub struct InstallEnv<'a> {
     /// created if absent). Composer keeps the equivalent in
     /// `~/.composer/cache/files/`.
     pub cache_root: &'a Path,
+    /// Installs packages the lock pins to a git `source` with no dist. `None`
+    /// (the default) makes such packages a preflight error.
+    pub source_fetcher: Option<&'a dyn SourceFetcher>,
+}
+
+impl<'a> InstallEnv<'a> {
+    /// The required seams: a dist fetcher, a progress sink, and the dist cache
+    /// directory. Source installs are off until
+    /// [`with_source_fetcher`](Self::with_source_fetcher).
+    pub fn new(fetcher: &'a dyn Fetcher, progress: &'a dyn Progress, cache_root: &'a Path) -> Self {
+        Self {
+            fetcher,
+            progress,
+            cache_root,
+            source_fetcher: None,
+        }
+    }
+
+    /// Install git-source packages with `source_fetcher` — typically a
+    /// [`crate::GitSourceFetcher`].
+    #[must_use]
+    pub fn with_source_fetcher(mut self, source_fetcher: &'a dyn SourceFetcher) -> Self {
+        self.source_fetcher = Some(source_fetcher);
+        self
+    }
 }
 
 impl std::fmt::Debug for InstallEnv<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstallEnv")
             .field("cache_root", &self.cache_root)
+            .field("source_fetcher", &self.source_fetcher.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -185,8 +215,9 @@ pub fn install_from_lock(
 ///
 /// # Panics
 ///
-/// Panics on an internal preflight invariant violation — the inner unwrap on
-/// `p.dist` relies on `preflight` having already rejected source-only packages.
+/// Only on an internal invariant violation: every package with a dist yields
+/// at least its own dist URL.
+///
 #[tracing::instrument(skip_all, fields(project_root = %project_root.display()))]
 pub fn install_from_lock_with_patches(
     env: &InstallEnv<'_>,
@@ -221,6 +252,7 @@ pub fn install_from_lock_with_patches(
         &lock,
         opts.no_dev,
         hooks.is_some(),
+        env.source_fetcher.is_some(),
     )?);
 
     // Assemble per-host auth from every source Composer understands —
@@ -376,10 +408,22 @@ pub fn install_from_lock_with_patches(
     // host matches the auth map. Mirrors can sit on a different host than the
     // dist URL, so auth is resolved per candidate. String storage lives in a
     // sibling vec so `DistRequest` can carry borrowed data.
-    let candidate_sets: Vec<Vec<DistCandidate>> = install_set
+    //
+    // The changed set splits into dist installs and git-source installs.
+    // `vendor_dirs` is index-aligned to `install_set`; both channels fill the
+    // same destinations, and everything after (patches, deploy, autoload,
+    // bins) treats a source checkout exactly like an extracted dist.
+    let dist_indices: Vec<usize> = (0..install_set.len())
+        .filter(|&i| install_set[i].dist.is_some())
+        .collect();
+    let source_indices: Vec<usize> = (0..install_set.len())
+        .filter(|&i| install_set[i].is_source_install())
+        .collect();
+    let candidate_sets: Vec<Vec<DistCandidate>> = dist_indices
         .iter()
-        .map(|p| {
-            p.dist_urls()
+        .map(|&i| {
+            install_set[i]
+                .dist_urls()
                 .into_iter()
                 .map(|url| {
                     let auth_entry = composer_auth::auth_key(&url)
@@ -394,28 +438,47 @@ pub fn install_from_lock_with_patches(
                 .collect()
         })
         .collect();
-    let dists: Vec<DistRequest<'_>> = install_set
+    let dists: Vec<DistRequest<'_>> = dist_indices
         .iter()
-        .zip(vendor_dirs.iter())
         .zip(candidate_sets.iter())
-        .map(|((p, dest), candidates)| {
-            let dist = p.dist.as_ref().unwrap();
+        .filter_map(|(&i, candidates)| {
+            let p = install_set[i];
+            let dist = p.dist.as_ref()?;
             // `dist_urls()` yields at least the dist's own URL for every package
-            // with a dist, and preflight filtered the rest out.
+            // with a dist.
             let (primary, fallbacks) = candidates
                 .split_first()
                 .expect("non-empty dist_urls for a dist package");
-            DistRequest {
+            Some(DistRequest {
                 package_name: &p.name,
                 url: &primary.url,
                 sha1: dist.shasum.as_deref().unwrap_or(""),
                 reference: dist.reference.as_deref().unwrap_or(""),
                 strip_prefix: None,
-                vendor_dest: dest,
+                // Preflight rejected every other dist type.
+                archive: ArchiveKind::from_dist_type(&dist.kind).unwrap_or(ArchiveKind::Zip),
+                vendor_dest: &vendor_dirs[i],
                 auth_header: primary.auth_header.as_deref(),
                 auth_header_name: primary.auth_header_name,
                 project_root,
                 fallbacks,
+            })
+        })
+        .collect();
+    let source_url_sets: Vec<Vec<String>> = source_indices
+        .iter()
+        .map(|&i| install_set[i].source_urls())
+        .collect();
+    let source_specs: Vec<SourceSpec<'_>> = source_indices
+        .iter()
+        .zip(source_url_sets.iter())
+        .map(|(&i, urls)| {
+            let p = install_set[i];
+            SourceSpec {
+                package_name: &p.name,
+                urls,
+                reference: p.source.as_ref().map_or("", |s| s.reference.as_str()),
+                dest: &vendor_dirs[i],
             }
         })
         .collect();
@@ -427,6 +490,13 @@ pub fn install_from_lock_with_patches(
         env.progress,
         opts.link_mode,
     )?;
+
+    // Clone + check out git-source packages. Preflight rejected them unless a
+    // source fetcher is configured.
+    let sources_installed = match env.source_fetcher {
+        Some(fetcher) if !source_specs.is_empty() => materialize_sources(fetcher, &source_specs)?,
+        _ => 0,
+    };
 
     // Materialize `type: path` packages (symlink-or-copy) into their vendor
     // destinations. Done before the autoload dump so the generated autoloader
@@ -573,7 +643,11 @@ pub fn install_from_lock_with_patches(
     .unwrap_or(u32::MAX);
     // Fold path-package materialization into the totals: a freshly linked/copied
     // path package counts as installed; an unchanged one counts as up-to-date.
-    let packages_installed = packages_installed.saturating_add(path_summary.linked);
+    // Git-source installs (always freshly checked out when in the install
+    // set) count as installed too.
+    let packages_installed = packages_installed
+        .saturating_add(path_summary.linked)
+        .saturating_add(u32::try_from(sources_installed).unwrap_or(u32::MAX));
     let packages_up_to_date = packages_up_to_date.saturating_add(path_summary.up_to_date);
     if let Err(e) = new_record.write(project_root) {
         warnings.push(format!(
@@ -928,10 +1002,17 @@ fn read_installed_state(project_root: &Path) -> Option<InstalledState> {
         if name.is_empty() {
             continue;
         }
+        // The dist reference, or the source reference for a git-source
+        // install, so source packages diff on their checked-out commit.
         let reference = pkg
             .get("dist")
             .and_then(|d| d.get("reference"))
             .and_then(|r| r.as_str())
+            .or_else(|| {
+                pkg.get("source")
+                    .and_then(|s| s.get("reference"))
+                    .and_then(|r| r.as_str())
+            })
             .unwrap_or("");
         packages.insert(name.to_string(), reference.to_string());
     }
@@ -982,11 +1063,9 @@ pub(crate) fn diff_install_set_with_force<'a>(
 /// single source of truth for "no fresh extract needed", shared by the
 /// install-set diff and the patch-coupling force computation.
 fn dist_up_to_date(p: &LockPackage, state: &InstalledState, project_root: &Path) -> bool {
-    let lock_ref = p
-        .dist
-        .as_ref()
-        .and_then(|d| d.reference.as_deref())
-        .unwrap_or("");
+    // The dist reference, or the source reference for a git-source install:
+    // a source package re-clones only when its locked commit changes.
+    let lock_ref = p.install_reference();
     state.packages.get(&p.name).is_some_and(|installed_ref| {
         installed_ref == lock_ref && project_root.join("vendor").join(&p.name).is_dir()
     })
@@ -1056,6 +1135,7 @@ fn preflight(
     lock: &Lock,
     no_dev: bool,
     scripts_on: bool,
+    sources_on: bool,
 ) -> Result<Vec<String>> {
     let mut reasons: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -1110,17 +1190,34 @@ fn preflight(
             plugin_packages.push(p.name.clone());
         }
         let Some(dist) = &p.dist else {
-            reasons.push(format!(
-                "package `{}` has no `dist` block (source-only install); \
-                 this installer does not clone VCS sources — run a full `composer install`.",
-                p.name,
-            ));
+            // No dist: install from a git `source` when a source fetcher is
+            // configured. Composer normalizes github/gitlab/bitbucket sources
+            // to `git` in the lock; hg/svn sources are not supported.
+            match &p.source {
+                Some(src) if src.kind == "git" && sources_on => {}
+                Some(src) if src.kind == "git" => reasons.push(format!(
+                    "package `{}` has no `dist` block, only a git source, and git source \
+                     installs are not enabled — configure a source fetcher, or run a full \
+                     `composer install`.",
+                    p.name,
+                )),
+                Some(src) => reasons.push(format!(
+                    "package `{}` has a `{}` source; this installer can only install git \
+                     sources — run a full `composer install`.",
+                    p.name, src.kind,
+                )),
+                None => reasons.push(format!(
+                    "package `{}` has no `dist` block and no git `source` to clone — run a \
+                     full `composer install`.",
+                    p.name,
+                )),
+            }
             continue;
         };
-        if dist.kind != "zip" {
+        if ArchiveKind::from_dist_type(&dist.kind).is_none() {
             reasons.push(format!(
-                "package `{}` uses dist type `{}`; this installer currently supports only \
-                 zip dists — run a full `composer install`.",
+                "package `{}` uses dist type `{}`; this installer handles only `zip` and \
+                 `tar` dists — run a full `composer install`.",
                 p.name, dist.kind,
             ));
         }
