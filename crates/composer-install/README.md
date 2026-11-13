@@ -11,7 +11,7 @@ Given a `composer.json` + `composer.lock` and a project root, it reproduces what
 `composer install` does to the filesystem:
 
 1. verify the lock's content-hash (warn, never block, on drift);
-2. preflight the lockfile (reject source-only / non-zip dists; warn about Composer plugins
+2. preflight the lockfile (reject source-only and non-zip/tar dists; warn about Composer plugins
    and unrun `scripts`);
 3. diff against `vendor/composer/installed.json` to skip up-to-date packages and sweep
    stale ones;
