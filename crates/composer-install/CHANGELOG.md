@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.4.0...composer-install-v0.5.0) (2026-11-13)
+
+
+### Features
+
+* **composer-install:** tell Progress how many dists an install fetches ([16535bc](https://github.com/cresset-tools/composer-client/commit/16535bccfa29ef6f8b688e307fa9726c699842f9))
+
 ## [0.4.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.3.0...composer-install-v0.4.0) (2026-11-13)
 
 
