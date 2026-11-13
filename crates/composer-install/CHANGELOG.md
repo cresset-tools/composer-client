@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.5.0...composer-install-v0.6.0) (2026-11-13)
+
+
+### Features
+
+* **composer-install:** extract zstd-compressed tar dists ([9e71054](https://github.com/cresset-tools/composer-client/commit/9e7105449ef6a520df712bcfd0b48ed4e157fe41))
+* **composer-install:** let the caller name itself and its commands in messages ([97fc6d1](https://github.com/cresset-tools/composer-client/commit/97fc6d1834f02418bc59c866bcb747e419b4ca9f))
+
 ## [0.5.0](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.4.0...composer-install-v0.5.0) (2026-11-13)
 
 
