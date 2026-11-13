@@ -184,9 +184,16 @@ fn downloads_tar_dist_and_extracts_with_detected_prefix() {
 }
 
 #[derive(Default)]
-struct RecordRetries(std::sync::Mutex<Vec<(String, u32)>>);
+struct RecordRetries(
+    std::sync::Mutex<Vec<(String, u32)>>,
+    std::sync::atomic::AtomicUsize,
+);
 
 impl Progress for RecordRetries {
+    fn on_start(&self, dists: usize) {
+        self.1.store(dists, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn on_retry(&self, package: &str, attempt: u32, _error: &eyre::Report) {
         self.0.lock().unwrap().push((package.to_owned(), attempt));
     }
@@ -250,6 +257,7 @@ fn a_retried_fetch_is_reported_to_progress() {
         *progress.0.lock().unwrap(),
         vec![("acme/foo".to_owned(), 1)]
     );
+    assert_eq!(progress.1.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
