@@ -67,6 +67,40 @@ pub struct InstallEnv<'a> {
     /// File name, under `vendor/composer/`, of the autoloader freshness
     /// marker. Defaults to `.composer-install-autoload-fresh`.
     pub autoload_marker: &'a str,
+    /// How warnings and preflight blockers name the calling tool and its
+    /// commands. Defaults to tool-neutral text; see [`Wording`].
+    pub wording: Wording<'a>,
+}
+
+/// The words messages use for the calling tool, so a CLI built on this crate
+/// can point its users at its own commands. Start from
+/// [`Wording::default`] and set the fields that differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Wording<'a> {
+    /// The tool, as the subject of a sentence: "… that `tool` does not
+    /// relocate". Defaults to `this installer`.
+    pub tool: &'a str,
+    /// The command that regenerates `composer.lock`. Defaults to
+    /// `composer update`.
+    pub update_command: &'a str,
+    /// The command that installs what this crate cannot (plugin hooks,
+    /// non-git sources, other dist types). Defaults to `composer install`.
+    pub install_command: &'a str,
+    /// A sentence telling the user how to have root scripts run. Defaults to
+    /// naming [`ScriptHooks`], the library seam.
+    pub scripts_hint: &'a str,
+}
+
+impl Default for Wording<'_> {
+    fn default() -> Self {
+        Self {
+            tool: "this installer",
+            update_command: "composer update",
+            install_command: "composer install",
+            scripts_hint: "Supply a `ScriptHooks` implementation to run them.",
+        }
+    }
 }
 
 impl<'a> InstallEnv<'a> {
@@ -81,7 +115,16 @@ impl<'a> InstallEnv<'a> {
             source_fetcher: None,
             machine_auth: None,
             autoload_marker: AUTOLOAD_FRESH_MARKER,
+            wording: Wording::default(),
         }
+    }
+
+    /// Name the calling tool and its commands in warnings and preflight
+    /// blockers; see [`Wording`].
+    #[must_use]
+    pub fn with_wording(mut self, wording: Wording<'a>) -> Self {
+        self.wording = wording;
+        self
     }
 
     /// Add machine-wide credentials from the caller's own store; see
@@ -116,6 +159,7 @@ impl std::fmt::Debug for InstallEnv<'_> {
             .field("source_fetcher", &self.source_fetcher.is_some())
             .field("machine_auth", &self.machine_auth.map(HashMap::len))
             .field("autoload_marker", &self.autoload_marker)
+            .field("wording", &self.wording)
             .finish_non_exhaustive()
     }
 }
@@ -283,13 +327,15 @@ pub fn install_from_lock_with_patches(
     // A stale lock (content-hash mismatch) warns rather than blocks — same as
     // Composer. Surface it first so it leads the warning list.
     let mut warnings = Vec::new();
-    warnings.extend(content_hash_warning(&composer_json_bytes, &lock)?);
+    let wording = &env.wording;
+    warnings.extend(content_hash_warning(&composer_json_bytes, &lock, wording)?);
     warnings.extend(preflight(
         &composer_json_bytes,
         &lock,
         opts.no_dev,
         hooks.is_some(),
         env.source_fetcher.is_some(),
+        wording,
     )?);
 
     // Assemble per-host auth from every source Composer understands —
@@ -347,14 +393,15 @@ pub fn install_from_lock_with_patches(
         if !blocking.is_empty() {
             return Err(eyre!(
                 "Laravel post-autoload-dump runs steps before/among the default Laravel steps \
-                 that this installer does not reproduce:\n  {}\n\nIt reproduces \
-                 `artisan package:discover` and `ComposerScripts::postAutoloadDump` natively, \
+                 that {tool} does not reproduce:\n  {}\n\n\
+                 `artisan package:discover` and `ComposerScripts::postAutoloadDump` are reproduced natively, \
                  but only when they run first — a step ahead of or between them may change what \
                  they see. Steps appended *after* the defaults are fine. Reorder so custom steps \
                  come last, or run the script yourself (`composer run-script post-autoload-dump`). \
                  If Laravel changed its default post-autoload-dump, the native discovery is out of \
                  date — please report it.",
                 blocking.join("\n  "),
+                tool = wording.tool,
             ));
         }
     }
@@ -432,13 +479,14 @@ pub fn install_from_lock_with_patches(
                     composer_installers::unsupported_framework(p.package_type.as_deref())
             {
                 warnings.push(format!(
-                    "{}: package type '{}' is a composer/installers '{}' type that this installer \
+                    "{}: package type '{}' is a composer/installers '{}' type that {tool} \
                      does not relocate — installing to vendor/{} (the framework may expect it \
                      elsewhere; add an extra.installer-paths entry to override)",
                     p.name,
                     p.package_type.as_deref().unwrap_or(""),
                     framework,
                     p.name,
+                    tool = wording.tool,
                 ));
             }
             project_root.join(rel)
@@ -1142,7 +1190,11 @@ fn autoload_fingerprint(composer_json_bytes: &[u8], lock_bytes: &[u8], no_dev: b
 /// lock's package set anyway, so the user gets a reproducible (if slightly
 /// stale) environment rather than a refusal. We mirror that — return the
 /// warning string on mismatch, `None` otherwise.
-fn content_hash_warning(composer_json_bytes: &[u8], lock: &Lock) -> Result<Option<String>> {
+fn content_hash_warning(
+    composer_json_bytes: &[u8],
+    lock: &Lock,
+    wording: &Wording<'_>,
+) -> Result<Option<String>> {
     let Some(expected) = &lock.content_hash else {
         // Pre-1.10 lockfiles don't carry a content-hash. Composer tolerates
         // them; we do too rather than refuse to install a working historical
@@ -1156,7 +1208,8 @@ fn content_hash_warning(composer_json_bytes: &[u8], lock: &Lock) -> Result<Optio
     Ok(Some(format!(
         "composer.lock is out of sync with composer.json (content-hash {expected} → {actual}); \
          installing the locked package set anyway — you may be getting outdated dependencies. \
-         Run `composer update` to regenerate the lock.",
+         Run `{}` to regenerate the lock.",
+        wording.update_command,
     )))
 }
 
@@ -1178,7 +1231,14 @@ fn preflight(
     no_dev: bool,
     scripts_on: bool,
     sources_on: bool,
+    wording: &Wording<'_>,
 ) -> Result<Vec<String>> {
+    let Wording {
+        tool,
+        install_command,
+        scripts_hint,
+        ..
+    } = *wording;
     let mut reasons: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut plugin_packages: Vec<String> = Vec::new();
@@ -1197,11 +1257,9 @@ fn preflight(
             value.get("scripts").unwrap_or(&Value::Null),
         )
     {
-        warnings.push(
-            "composer.json declares `scripts`; they are not run by default. \
-             Supply a `ScriptHooks` implementation to run them."
-                .into(),
-        );
+        warnings.push(format!(
+            "composer.json declares `scripts`; they are not run by default. {scripts_hint}"
+        ));
     }
 
     let packages: Vec<&LockPackage> = if no_dev {
@@ -1239,18 +1297,18 @@ fn preflight(
                 Some(src) if src.kind == "git" && sources_on => {}
                 Some(src) if src.kind == "git" => reasons.push(format!(
                     "package `{}` has no `dist` block, only a git source, and git source \
-                     installs are not enabled — configure a source fetcher, or run a full \
-                     `composer install`.",
+                     installs are not enabled — configure a source fetcher, or install it \
+                     with `{install_command}`.",
                     p.name,
                 )),
                 Some(src) => reasons.push(format!(
-                    "package `{}` has a `{}` source; this installer can only install git \
-                     sources — run a full `composer install`.",
+                    "package `{}` has a `{}` source; {tool} can only install git \
+                     sources — install it with `{install_command}`.",
                     p.name, src.kind,
                 )),
                 None => reasons.push(format!(
-                    "package `{}` has no `dist` block and no git `source` to clone — run a \
-                     full `composer install`.",
+                    "package `{}` has no `dist` block and no git `source` to clone — install \
+                     it with `{install_command}`.",
                     p.name,
                 )),
             }
@@ -1258,8 +1316,8 @@ fn preflight(
         };
         if ArchiveKind::from_dist_type(&dist.kind).is_none() {
             reasons.push(format!(
-                "package `{}` uses dist type `{}`; this installer handles only `zip` and \
-                 `tar` dists — run a full `composer install`.",
+                "package `{}` uses dist type `{}`; {tool} handles only `zip` and \
+                 `tar` dists — install it with `{install_command}`.",
                 p.name, dist.kind,
             ));
         }
@@ -1278,8 +1336,8 @@ fn preflight(
         };
         warnings.push(format!(
             "{noun} {names} {verb} Composer plugins (type `composer-plugin`); \
-             {pronoun} files install like any other package's, but this installer \
-             does not run plugin install-time hooks. Run a full `composer install` \
+             {pronoun} files install like any other package's, but {tool} \
+             does not run plugin install-time hooks. Run `{install_command}` \
              if the hook behavior is required.",
             verb = if plugin_packages.len() == 1 {
                 "is a"

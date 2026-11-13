@@ -81,7 +81,7 @@ pub use downloader::{DistCandidate, DistOutcome, DistRequest, fetch_and_extract_
 pub use error::{InstallError, VcsFailure};
 pub use fetch::{FetchSpec, Fetcher, ReqwestFetcher};
 pub use orchestrate::{
-    InstallEnv, InstallOptions, InstallSummary, LinkMode, ScriptHooks, install_from_lock,
+    InstallEnv, InstallOptions, InstallSummary, LinkMode, ScriptHooks, Wording, install_from_lock,
     install_from_lock_with_patches,
 };
 pub use progress::{NoProgress, Progress};
