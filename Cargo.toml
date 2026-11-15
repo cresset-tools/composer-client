@@ -75,7 +75,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
 ] }
 # Composer dist archives are zip; `deflate` is the only codec Packagist emits.
-zip = { version = "8.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 # `type: tar` dists: plain, gzip- or zstd-compressed tarballs.
 tar = "0.4"
 flate2 = "1.1"
