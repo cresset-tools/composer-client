@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/cresset-tools/composer-client/compare/composer-manifest-v0.2.0...composer-manifest-v0.2.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **composer-manifest:** read funding entries that have no url ([8055abf](https://github.com/cresset-tools/composer-client/commit/8055abfc3833d77f38b8bf647abf45122ad4bf53))
+
 ## [0.2.0](https://github.com/cresset-tools/composer-client/compare/composer-manifest-v0.1.0...composer-manifest-v0.2.0) (2026-11-13)
 
 
