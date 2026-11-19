@@ -16,6 +16,8 @@
 //! ```
 //! `map` entries are `[source-relative-to-package, dest-relative-to-root]`
 //! pairs; `chmod` entries are `{ mask: <octal-string>, path: <root-rel> }`.
+//! A source that doesn't exist literally is globbed, and each match is
+//! deployed to `dest/<basename>` (e.g. `* => Algolia/CustomAlgolia`).
 //!
 //! `app/etc/vendor_path.php` is *not* in the map — the plugin generates
 //! it — so we emit [`VENDOR_PATH_PHP`] separately (see the orchestrator).
@@ -185,14 +187,6 @@ pub fn apply_deploy(
     let mut stats = DeployStats::default();
 
     for (source, dest) in &plan.map {
-        if source.contains('*') {
-            // Glob mappings exist in the M1 installer but not in M2
-            // component maps (magento2-base uses literal pairs). Defer
-            // rather than silently mis-handle.
-            return Err(eyre!(
-                "extra.map glob patterns are not yet supported (entry: {source} => {dest})"
-            ));
-        }
         let Some(src_rel) = contained(source) else {
             stats.warnings.push(format!(
                 "skipped extra.map entry {source} => {dest}: source is outside the package"
@@ -205,10 +199,39 @@ pub fn apply_deploy(
             ));
             continue;
         };
-        stats.add(copy_path(
-            &package_dir.join(src_rel),
-            &project_root.join(dst_rel),
-        )?);
+        let src_path = package_dir.join(&src_rel);
+        // As in the PHP installer, a source is only a glob when it does not
+        // exist literally: an existing `foo[1].txt` is copied as a file.
+        if std::fs::symlink_metadata(&src_path).is_err() && is_glob(&src_rel) {
+            let matches = glob(package_dir, &src_rel)?;
+            if matches.is_empty() {
+                // PHP throws "Source ... does not exist" here too.
+                return Err(eyre!(
+                    "deploy source {} matches nothing (entry: {source} => {dest})",
+                    src_path.display()
+                ));
+            }
+            // Every match, file or directory, lands at `dest/<its basename>`
+            // (a directory is copied recursively, dotfiles included).
+            for matched in matches {
+                let Some(name) = matched.file_name() else {
+                    continue;
+                };
+                let Some(match_dst) = contained_path(&dst_rel.join(name)) else {
+                    stats.warnings.push(format!(
+                        "skipped extra.map match {} of {source} => {dest}: destination is outside the project root",
+                        matched.display()
+                    ));
+                    continue;
+                };
+                stats.add(copy_path(
+                    &package_dir.join(&matched),
+                    &project_root.join(match_dst),
+                )?);
+            }
+            continue;
+        }
+        stats.add(copy_path(&src_path, &project_root.join(dst_rel))?);
     }
 
     for entry in &plan.chmod {
@@ -257,6 +280,136 @@ fn contained_path(p: &Path) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// Whether a component of `p` holds a metacharacter PHP's `glob()` acts
+/// on. The installer calls it with no flags, so braces are literal.
+fn is_glob(p: &Path) -> bool {
+    p.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| s.contains(['*', '?', '[']))
+    })
+}
+
+/// Expand `pattern` (relative to `base`) as the PHP installer does:
+/// `Laminas\Stdlib\Glob::glob($pattern)` with no flags, i.e. the system
+/// `glob(3)`. Wildcards never cross `/`; a name starting with `.` is only
+/// matched by a pattern starting with a literal `.` (so `*` skips
+/// dotfiles); non-final components match only directories; the result
+/// is sorted. Matches are returned relative to `base`.
+fn glob(base: &Path, pattern: &Path) -> Result<Vec<PathBuf>> {
+    let components: Vec<_> = pattern.components().collect();
+    let mut current = vec![PathBuf::new()];
+    for (i, component) in components.iter().enumerate() {
+        let last = i + 1 == components.len();
+        let part = component.as_os_str();
+        let mut next = Vec::new();
+        if let Some(pat) = part.to_str().filter(|s| s.contains(['*', '?', '['])) {
+            for dir in &current {
+                let Ok(entries) = std::fs::read_dir(base.join(dir)) else {
+                    continue;
+                };
+                for entry in entries {
+                    let name = entry?.file_name();
+                    let Some(name_str) = name.to_str() else {
+                        continue;
+                    };
+                    if name_str.starts_with('.') && !pat.starts_with('.') {
+                        continue;
+                    }
+                    if !fnmatch(pat.as_bytes(), name_str.as_bytes()) {
+                        continue;
+                    }
+                    let candidate = dir.join(&name);
+                    if last || base.join(&candidate).is_dir() {
+                        next.push(candidate);
+                    }
+                }
+            }
+        } else {
+            for dir in &current {
+                let candidate = dir.join(part);
+                let full = base.join(&candidate);
+                if full.is_dir() || (last && std::fs::symlink_metadata(&full).is_ok()) {
+                    next.push(candidate);
+                }
+            }
+        }
+        current = next;
+    }
+    current.sort_by(|a, b| {
+        a.as_os_str()
+            .as_encoded_bytes()
+            .cmp(b.as_os_str().as_encoded_bytes())
+    });
+    Ok(current)
+}
+
+/// Match one path component against a `glob(3)` pattern: `*` (any run),
+/// `?` (one byte), `[...]` / `[!...]` / `[^...]` with ranges, and `\`
+/// escaping the next byte. An unterminated `[` is literal.
+fn fnmatch(pat: &[u8], name: &[u8]) -> bool {
+    let (mut p, mut n) = (0, 0);
+    // Where to resume after the most recent `*`: the pattern index just
+    // past it, and the name index it has absorbed up to.
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        let step = match pat.get(p) {
+            Some(b'*') => {
+                star = Some((p + 1, n));
+                p += 1;
+                continue;
+            }
+            Some(b'?') => Some(p + 1),
+            Some(b'[') => match match_class(&pat[p..], name[n]) {
+                Some((true, len)) => Some(p + len),
+                Some((false, _)) => None,
+                None => (name[n] == b'[').then_some(p + 1),
+            },
+            Some(b'\\') if p + 1 < pat.len() => (pat[p + 1] == name[n]).then_some(p + 2),
+            Some(&c) => (c == name[n]).then_some(p + 1),
+            None => None,
+        };
+        if let Some(np) = step {
+            p = np;
+            n += 1;
+        } else if let Some((sp, sn)) = star {
+            star = Some((sp, sn + 1));
+            p = sp;
+            n = sn + 1;
+        } else {
+            return false;
+        }
+    }
+    pat[p..].iter().all(|&c| c == b'*')
+}
+
+/// Match `c` against the bracket expression at the start of `pat`.
+/// Returns whether it matched and the expression's length, or `None` when
+/// the `[` is never closed.
+fn match_class(pat: &[u8], c: u8) -> Option<(bool, usize)> {
+    let mut i = 1;
+    let negate = matches!(pat.get(i), Some(b'!' | b'^'));
+    if negate {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    loop {
+        let lo = *pat.get(i)?;
+        if lo == b']' && !first {
+            return Some((matched != negate, i + 1));
+        }
+        first = false;
+        if pat.get(i + 1) == Some(&b'-') && pat.get(i + 2).is_some_and(|&hi| hi != b']') {
+            matched |= (lo..=pat[i + 2]).contains(&c);
+            i += 3;
+        } else {
+            matched |= lo == c;
+            i += 1;
+        }
+    }
 }
 
 /// Copy a file or directory tree from `src` to `dst`, creating parent
@@ -423,15 +576,149 @@ mod tests {
         );
     }
 
+    /// `algolia/algoliasearch-custom-algolia-magento-2` maps
+    /// `* => Algolia/CustomAlgolia`. PHP globs the package root (dotfiles
+    /// excluded), then deploys each match to `dest/<basename>`, copying
+    /// directories recursively with their dotfiles.
     #[test]
-    fn glob_source_is_rejected() {
+    fn star_glob_maps_each_match_under_dest() {
         let pkg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(pkg.path().join("registration.php"), b"<?php").unwrap();
+        std::fs::write(pkg.path().join(".gitignore"), b"x").unwrap();
+        std::fs::create_dir_all(pkg.path().join(".github")).unwrap();
+        std::fs::write(pkg.path().join(".github/ci.yml"), b"x").unwrap();
+        std::fs::create_dir_all(pkg.path().join("etc/frontend")).unwrap();
+        std::fs::write(pkg.path().join("etc/module.xml"), b"<config/>").unwrap();
+        std::fs::write(pkg.path().join("etc/frontend/.htaccess"), b"deny").unwrap();
+
+        let plan = plan_deploy(
+            Some("magento2-module"),
+            &json!({"map": [["*", "Algolia/CustomAlgolia"]]}),
+        )
+        .unwrap();
+        let stats = apply_deploy(&plan, pkg.path(), root.path()).unwrap();
+
+        let dest = root.path().join("Algolia/CustomAlgolia");
+        assert!(dest.join("registration.php").is_file());
+        assert!(dest.join("etc/module.xml").is_file());
+        assert!(dest.join("etc/frontend/.htaccess").is_file());
+        assert!(!dest.join(".gitignore").exists());
+        assert!(!dest.join(".github").exists());
+        assert_eq!(stats.files_copied, 3);
+        assert!(stats.warnings.is_empty());
+    }
+
+    /// `dir/* => dest` and `dir/* => dest/` are the same: matches land in
+    /// `dest`, not `dest/dir`. A trailing-segment glob filters by name.
+    #[test]
+    fn glob_in_subdir_and_trailing_slash() {
+        let pkg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(pkg.path().join("locale")).unwrap();
+        std::fs::write(pkg.path().join("locale/de_DE.csv"), b"de").unwrap();
+        std::fs::write(pkg.path().join("locale/nl_NL.csv"), b"nl").unwrap();
+        std::fs::write(pkg.path().join("locale/README"), b"r").unwrap();
+
         let plan = DeployPlan {
-            map: vec![("locale/*".into(), "app/locale".into())],
+            map: vec![
+                ("locale/*.csv".into(), "app/i18n/".into()),
+                ("locale/*".into(), "all".into()),
+            ],
+            ..Default::default()
+        };
+        let stats = apply_deploy(&plan, pkg.path(), root.path()).unwrap();
+        assert!(root.path().join("app/i18n/de_DE.csv").is_file());
+        assert!(root.path().join("app/i18n/nl_NL.csv").is_file());
+        assert!(!root.path().join("app/i18n/README").exists());
+        assert!(root.path().join("all/README").is_file());
+        assert!(!root.path().join("all/locale").exists());
+        assert_eq!(stats.files_copied, 5);
+    }
+
+    /// Wildcards in an intermediate component match directories only, and
+    /// each match keeps just its basename under `dest`.
+    #[test]
+    fn glob_in_intermediate_component() {
+        let pkg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for d in ["a", "b"] {
+            std::fs::create_dir_all(pkg.path().join(d).join("etc")).unwrap();
+            std::fs::write(
+                pkg.path().join(d).join("etc").join(format!("{d}.xml")),
+                b"x",
+            )
+            .unwrap();
+        }
+        std::fs::write(pkg.path().join("c"), b"file, not a dir").unwrap();
+        let plan = DeployPlan {
+            map: vec![("*/etc/*.xml".into(), "conf".into())],
+            ..Default::default()
+        };
+        apply_deploy(&plan, pkg.path(), root.path()).unwrap();
+        assert!(root.path().join("conf/a.xml").is_file());
+        assert!(root.path().join("conf/b.xml").is_file());
+    }
+
+    /// A source that exists literally is never globbed, and a glob with no
+    /// matches is an error (PHP: "Source ... does not exist").
+    #[test]
+    fn literal_beats_glob_and_empty_glob_errors() {
+        let pkg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(pkg.path().join("f[1].txt"), b"x").unwrap();
+        std::fs::write(pkg.path().join("f1.txt"), b"y").unwrap();
+        let plan = DeployPlan {
+            map: vec![("f[1].txt".into(), "out.txt".into())],
+            ..Default::default()
+        };
+        apply_deploy(&plan, pkg.path(), root.path()).unwrap();
+        assert_eq!(std::fs::read(root.path().join("out.txt")).unwrap(), b"x");
+
+        let plan = DeployPlan {
+            map: vec![("nope/*".into(), "out".into())],
             ..Default::default()
         };
         assert!(apply_deploy(&plan, pkg.path(), root.path()).is_err());
+    }
+
+    /// Every expanded destination goes through the same root check.
+    #[test]
+    fn glob_destination_outside_root_is_skipped() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("project");
+        let pkg = outer.path().join("pkg");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("x.php"), b"<?php").unwrap();
+        let plan = DeployPlan {
+            map: vec![("*.php".into(), "../escaped".into())],
+            ..Default::default()
+        };
+        let stats = apply_deploy(&plan, &pkg, &root).unwrap();
+        assert!(!outer.path().join("escaped").exists());
+        assert_eq!(stats.files_copied, 0);
+        assert_eq!(stats.warnings.len(), 1);
+    }
+
+    #[test]
+    fn fnmatch_follows_glob3() {
+        assert!(fnmatch(b"*", b"anything"));
+        assert!(fnmatch(b"*.csv", b"de_DE.csv"));
+        assert!(!fnmatch(b"*.csv", b"de_DE.csv.bak"));
+        assert!(fnmatch(b"a*b*c", b"aXXbYYc"));
+        assert!(!fnmatch(b"a*b*c", b"aXXbYY"));
+        assert!(fnmatch(b"?.txt", b"a.txt"));
+        assert!(!fnmatch(b"?.txt", b"ab.txt"));
+        assert!(fnmatch(b"[a-c]x", b"bx"));
+        assert!(!fnmatch(b"[!a-c]x", b"bx"));
+        assert!(fnmatch(b"[^a-c]x", b"dx"));
+        assert!(fnmatch(b"[]]", b"]"));
+        assert!(fnmatch(b"\\*", b"*"));
+        assert!(!fnmatch(b"\\*", b"a"));
+        assert!(fnmatch(b"[abc", b"[abc"));
+        assert!(fnmatch(b"", b""));
+        assert!(!fnmatch(b"", b"a"));
     }
 
     #[test]
