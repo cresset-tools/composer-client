@@ -12,7 +12,7 @@ use std::path::Path;
 
 use eyre::{Result, bail};
 
-use crate::apply::{ApplyOptions, apply_patch};
+use crate::apply::{ApplyOptions, apply_patch_text};
 use crate::model::FailureMode;
 use crate::plan::{MaterializedPatch, fingerprint};
 use crate::report::ApplyReport;
@@ -46,13 +46,13 @@ pub fn apply_package_patches(
     let mut all_ok = true;
 
     for patch in patches {
-        let bytes = std::fs::read(&patch.local_path)
+        let text = std::fs::read_to_string(&patch.local_path)
             .map_err(|e| eyre::eyre!("reading patch `{}`: {e}", patch.local_path.display()))?;
         let opts = ApplyOptions {
             depth: patch.depth,
             ..ApplyOptions::default()
         };
-        match apply_patch(base_dir, &bytes, &opts) {
+        match apply_patch_text(base_dir, &text, &opts) {
             Ok(report) => {
                 applied.push(patch);
                 result.reports.push(report);

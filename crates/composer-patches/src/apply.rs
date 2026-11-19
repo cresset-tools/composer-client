@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr as _, bail};
-use flickzeug::{ApplyConfig, FuzzyConfig, LineEndHandling, apply_bytes_with_config};
+use flickzeug::{ApplyConfig, FuzzyConfig, LineEndHandling, apply_with_config};
 
 use crate::diff::{self, ChangeKind, FileDiff, strip_components};
 use crate::model::DepthSpec;
@@ -43,29 +43,20 @@ struct PlannedOp<'a> {
     abs_path: PathBuf,
     rel_path: String,
     /// `Some(content)` to write (create/modify); `None` to delete.
-    new_content: Option<Vec<u8>>,
+    new_content: Option<String>,
     file: &'a FileDiff<'a>,
 }
 
-/// Apply `patch_text` to the tree rooted at `base_dir`. See [`apply_patch`].
+/// Apply `patch_text` to the tree rooted at `base_dir`.
+///
+/// Returns the [`ApplyReport`] for the level that succeeded, or an error
+/// describing the last failure if no candidate depth applied cleanly.
 pub fn apply_patch_text(
     base_dir: &Path,
     patch_text: &str,
     opts: &ApplyOptions,
 ) -> Result<ApplyReport> {
-    apply_patch(base_dir, patch_text.as_bytes(), opts)
-}
-
-/// Apply the patch `patch` to the tree rooted at `base_dir`.
-///
-/// Patch and files are handled as bytes, so a file that is not UTF-8 (a
-/// Latin-1 source file, a CA bundle with Latin-1 comments) patches like any
-/// other; only its line endings are interpreted.
-///
-/// Returns the [`ApplyReport`] for the level that succeeded, or an error
-/// describing the last failure if no candidate depth applied cleanly.
-pub fn apply_patch(base_dir: &Path, patch: &[u8], opts: &ApplyOptions) -> Result<ApplyReport> {
-    let files = diff::split(patch)?;
+    let files = diff::split(patch_text)?;
     if files.is_empty() {
         bail!("patch contains no file diffs");
     }
@@ -131,11 +122,11 @@ fn plan_at_depth<'a>(
 
         let new_content = match file.kind {
             ChangeKind::Modify => {
-                let base = fs::read(&abs_path).wrap_err_with(|| {
+                let base = fs::read_to_string(&abs_path).wrap_err_with(|| {
                     format!("cannot read `{}` for patching", abs_path.display())
                 })?;
                 let (content, stats) =
-                    apply_bytes_with_config(&base, &file.diff, config_for(&base, config).as_ref())
+                    apply_with_config(&base, &file.diff, config_for(&base, config).as_ref())
                         .map_err(|e| eyre::eyre!("hunk failed on `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.lines_deleted += stats.lines_deleted;
@@ -144,7 +135,7 @@ fn plan_at_depth<'a>(
             }
             ChangeKind::Create => {
                 let (content, stats) =
-                    apply_bytes_with_config(b"", &file.diff, config_for(b"", config).as_ref())
+                    apply_with_config("", &file.diff, config_for("", config).as_ref())
                         .map_err(|e| eyre::eyre!("cannot synthesize new file `{rel}`: {e}"))?;
                 report.lines_added += stats.lines_added;
                 report.hunks_applied += stats.hunks_applied;
@@ -178,7 +169,7 @@ fn commit(ops: &[PlannedOp<'_>]) -> Result<()> {
                     fs::create_dir_all(parent)
                         .wrap_err_with(|| format!("cannot create `{}`", parent.display()))?;
                 }
-                atomic_write(&op.abs_path, content)?;
+                atomic_write(&op.abs_path, content.as_bytes())?;
             }
             None => {
                 fs::remove_file(&op.abs_path)
@@ -204,7 +195,7 @@ fn action_for(kind: ChangeKind) -> FileAction {
 /// endings, and an empty file has none, so it falls back to the platform's:
 /// CRLF on Windows. A new or empty file takes the patch's line endings
 /// instead, so the result is the same on every platform.
-fn config_for<'c>(base: &[u8], config: &'c ApplyConfig) -> Cow<'c, ApplyConfig> {
+fn config_for<'c>(base: &str, config: &'c ApplyConfig) -> Cow<'c, ApplyConfig> {
     if base.is_empty() {
         Cow::Owned(ApplyConfig {
             line_end_strategy: LineEndHandling::EnsurePatchLineEnding,
@@ -374,36 +365,5 @@ mod tests {
         let after = fs::read_to_string(dir.path().join("f.txt")).unwrap();
         assert!(after.contains("target patched"), "got: {after:?}");
         assert_eq!(report.files[0].action, FileAction::Modified);
-    }
-
-    #[test]
-    fn patches_a_file_that_is_not_utf8() {
-        // A CA bundle with Latin-1 comments: the patch only touches ASCII
-        // lines, but the rest of the file must come through byte for byte.
-        let dir = tempdir().unwrap();
-        let base = b"# Limitaciones de garant\xedas\nCERT A\nCERT B\nCERT C\n";
-        fs::write(dir.path().join("ca-bundle.crt"), base).unwrap();
-        let patch = "\
---- a/ca-bundle.crt
-+++ b/ca-bundle.crt
-@@ -2,3 +2,2 @@
- CERT A
--CERT B
- CERT C
-";
-        apply_patch_text(dir.path(), patch, &ApplyOptions::default()).unwrap();
-        let after = fs::read(dir.path().join("ca-bundle.crt")).unwrap();
-        assert_eq!(after, b"# Limitaciones de garant\xedas\nCERT A\nCERT C\n");
-    }
-
-    #[test]
-    fn applies_a_patch_whose_own_lines_are_not_utf8() {
-        // Changed and context lines in Latin-1, in both patch and file.
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("a.php"), b"$x = 'caf\xe9';\n$y = 1;\n").unwrap();
-        let patch = b"--- a/a.php\n+++ b/a.php\n@@ -1,2 +1,2 @@\n-$x = 'caf\xe9';\n+$x = 'th\xe9';\n $y = 1;\n";
-        apply_patch(dir.path(), patch, &ApplyOptions::default()).unwrap();
-        let after = fs::read(dir.path().join("a.php")).unwrap();
-        assert_eq!(after, b"$x = 'th\xe9';\n$y = 1;\n");
     }
 }

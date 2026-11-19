@@ -39,7 +39,7 @@ pub mod report;
 pub mod resolve;
 pub mod target;
 
-pub use apply::{ApplyOptions, apply_patch, apply_patch_text};
+pub use apply::{ApplyOptions, apply_patch_text};
 pub use build::{
     NoFetch, PatchFetcher, PlanOptions, build_plan, lock_install_paths, patches_dir_name,
     resolve_all,

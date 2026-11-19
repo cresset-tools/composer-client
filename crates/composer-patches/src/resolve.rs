@@ -99,9 +99,9 @@ pub fn resolve_patches_dir(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let bytes =
-            std::fs::read(&path).wrap_err_with(|| format!("reading patch `{}`", path.display()))?;
-        let parsed = diff::split(&bytes).wrap_err_with(|| format!("parsing `{name}`"))?;
+        let text = std::fs::read_to_string(&path)
+            .wrap_err_with(|| format!("reading patch `{}`", path.display()))?;
+        let parsed = diff::split(&text).wrap_err_with(|| format!("parsing `{name}`"))?;
         let header_paths: Vec<&str> = parsed
             .iter()
             .filter_map(diff::FileDiff::routed_path)
