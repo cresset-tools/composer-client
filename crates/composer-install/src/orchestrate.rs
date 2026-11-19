@@ -1001,6 +1001,12 @@ fn deploy_components(
             Ok(stats) => {
                 files_deployed += stats.files_copied;
                 deployed_component |= plan.is_component;
+                warnings.extend(
+                    stats
+                        .warnings
+                        .into_iter()
+                        .map(|w| format!("deploy of {}: {w}", pkg.name)),
+                );
             }
             Err(e) => {
                 warnings.push(format!("deploy of {} failed: {e}", pkg.name));

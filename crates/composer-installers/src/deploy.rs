@@ -82,18 +82,24 @@ pub struct DeployPlan {
 }
 
 /// Outcome of [`apply_deploy`], for the install summary.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeployStats {
     /// Number of files copied into the root (directories aren't counted).
     pub files_copied: u64,
     /// Number of `chmod` masks applied (no-op on non-Unix).
     pub chmods_applied: u64,
+    /// Entries skipped rather than applied: `map`/`chmod` paths that
+    /// resolve outside the project root, or `map` sources outside the
+    /// package. Each message names the entry; the caller prefixes the
+    /// package name when it surfaces them.
+    pub warnings: Vec<String>,
 }
 
 impl DeployStats {
     fn add(&mut self, other: DeployStats) {
         self.files_copied += other.files_copied;
         self.chmods_applied += other.chmods_applied;
+        self.warnings.extend(other.warnings);
     }
 }
 
@@ -156,6 +162,21 @@ pub fn plan_deploy(package_type: Option<&str>, extra: &Value) -> Option<DeployPl
 /// files (Composer's copy strategy throws on conflict unless
 /// `extra.magento-force`; a package manager re-running its own install
 /// always wants the force behavior, so we overwrite unconditionally).
+///
+/// Package metadata never gets to touch anything outside `project_root`:
+/// a `map` destination or `chmod` path that resolves (lexically) above the
+/// root, or a `map` source that resolves above `package_dir`, is skipped
+/// with an entry in [`DeployStats::warnings`] instead of failing the
+/// install. (`experius/module-csp` maps `csp_reporter.php` to
+/// `../../csp_reporter.php`, which the PHP installer writes two
+/// directories above the project.)
+///
+/// The check is lexical. Symlinks already under the root are followed, as
+/// the PHP installer follows them: this deploy cannot plant one (files are
+/// copied by content, and a symlinked directory source fails to copy), and
+/// the archive extractor refuses symlinks that escape the package, so a
+/// symlink on a destination's path was put there by the operator (e.g. a
+/// shared `pub/media`) or by a path repository.
 pub fn apply_deploy(
     plan: &DeployPlan,
     package_dir: &Path,
@@ -172,14 +193,33 @@ pub fn apply_deploy(
                 "extra.map glob patterns are not yet supported (entry: {source} => {dest})"
             ));
         }
-        let src_path = package_dir.join(rel(source));
-        let dst_path = project_root.join(rel(dest));
-        stats.add(copy_path(&src_path, &dst_path)?);
+        let Some(src_rel) = contained(source) else {
+            stats.warnings.push(format!(
+                "skipped extra.map entry {source} => {dest}: source is outside the package"
+            ));
+            continue;
+        };
+        let Some(dst_rel) = contained(dest) else {
+            stats.warnings.push(format!(
+                "skipped extra.map entry {source} => {dest}: destination is outside the project root"
+            ));
+            continue;
+        };
+        stats.add(copy_path(
+            &package_dir.join(src_rel),
+            &project_root.join(dst_rel),
+        )?);
     }
 
     for entry in &plan.chmod {
-        let target = project_root.join(rel(&entry.path));
-        if apply_chmod(&target, entry.mask)? {
+        let Some(path_rel) = contained(&entry.path) else {
+            stats.warnings.push(format!(
+                "skipped extra.chmod entry {}: path is outside the project root",
+                entry.path
+            ));
+            continue;
+        };
+        if apply_chmod(&project_root.join(path_rel), entry.mask)? {
             stats.chmods_applied += 1;
         }
     }
@@ -187,17 +227,42 @@ pub fn apply_deploy(
     Ok(stats)
 }
 
-/// Strip a leading `/` so a map/chmod path is always treated as
-/// project-relative even if it's authored with a leading slash, and
-/// normalize separators on Windows.
-fn rel(p: &str) -> PathBuf {
-    PathBuf::from(p.trim_start_matches('/'))
+/// Resolve a map/chmod path to a normalized path relative to its base
+/// directory, or `None` when it would escape that base.
+///
+/// A leading `/` is stripped first, so `/pub/index.php` means
+/// `<base>/pub/index.php`: the PHP installer builds `$destDir . '/' .
+/// $dest`, which reads it the same way. `.` components are dropped and
+/// `..` pops the previous component; a `..` with nothing left to pop, or
+/// a path that is still absolute (a Windows drive or UNC prefix), is
+/// refused.
+fn contained(p: &str) -> Option<PathBuf> {
+    contained_path(Path::new(p.trim_start_matches('/')))
+}
+
+/// [`contained`] for an already-split path.
+fn contained_path(p: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Copy a file or directory tree from `src` to `dst`, creating parent
 /// directories as needed and overwriting existing files. Mirrors the
-/// copy deploy strategy's file-to-file and dir-to-dir paths for the
-/// literal (non-glob) mappings Magento 2 components use.
+/// copy deploy strategy's file-to-file and dir-to-dir paths, for a
+/// literal mapping or a single expanded glob match.
 fn copy_path(src: &Path, dst: &Path) -> Result<DeployStats> {
     let meta = std::fs::symlink_metadata(src)
         .map_err(|e| eyre!("deploy source {} unreadable: {e}", src.display()))?;
@@ -217,7 +282,7 @@ fn copy_path(src: &Path, dst: &Path) -> Result<DeployStats> {
             .map_err(|e| eyre!("copying {} -> {}: {e}", src.display(), dst.display()))?;
         Ok(DeployStats {
             files_copied: 1,
-            chmods_applied: 0,
+            ..Default::default()
         })
     }
 }
@@ -367,6 +432,113 @@ mod tests {
             ..Default::default()
         };
         assert!(apply_deploy(&plan, pkg.path(), root.path()).is_err());
+    }
+
+    #[test]
+    fn contained_normalizes_and_refuses_escapes() {
+        assert_eq!(contained("pub/index.php"), Some("pub/index.php".into()));
+        assert_eq!(
+            contained("/pub/./a/../index.php"),
+            Some("pub/index.php".into())
+        );
+        assert_eq!(contained("a/.."), Some(PathBuf::new()));
+        assert_eq!(contained("../csp_reporter.php"), None);
+        assert_eq!(contained("../../pub/csp_reporter.php"), None);
+        assert_eq!(contained("pub/../../x"), None);
+        assert_eq!(contained("//../x"), None);
+    }
+
+    /// `experius/module-csp`'s map, verbatim: both entries climb out of
+    /// the project root and must be skipped, not written, while the rest
+    /// of the plan still applies.
+    #[test]
+    fn map_destination_outside_root_is_skipped() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("a/b/project");
+        let pkg = outer.path().join("pkg");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("csp_reporter.php"), b"<?php").unwrap();
+
+        let plan = plan_deploy(
+            Some("magento2-module"),
+            &json!({"map": [
+                ["csp_reporter.php", "../../csp_reporter.php"],
+                ["csp_reporter.php", "../../pub/csp_reporter.php"],
+                ["csp_reporter.php", "pub/csp_reporter.php"]
+            ]}),
+        )
+        .unwrap();
+        let stats = apply_deploy(&plan, &pkg, &root).unwrap();
+
+        assert!(!outer.path().join("a/csp_reporter.php").exists());
+        assert!(!outer.path().join("a/pub").exists());
+        assert!(root.join("pub/csp_reporter.php").is_file());
+        assert_eq!(stats.files_copied, 1);
+        assert_eq!(stats.warnings.len(), 2, "{:?}", stats.warnings);
+        assert!(stats.warnings[0].contains("../../csp_reporter.php"));
+        assert!(stats.warnings[1].contains("../../pub/csp_reporter.php"));
+    }
+
+    #[test]
+    fn map_source_outside_package_is_skipped() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("project");
+        let pkg = outer.path().join("pkg");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(outer.path().join("secret"), b"x").unwrap();
+
+        let plan = DeployPlan {
+            map: vec![("../secret".into(), "pub/secret".into())],
+            ..Default::default()
+        };
+        let stats = apply_deploy(&plan, &pkg, &root).unwrap();
+        assert!(!root.join("pub/secret").exists());
+        assert_eq!(stats.warnings.len(), 1);
+        assert!(stats.warnings[0].contains("source is outside the package"));
+    }
+
+    /// A leading `/` is project-relative (PHP concatenates `$destDir . '/'
+    /// . $dest`), so it stays inside the root rather than being refused.
+    #[test]
+    fn leading_slash_destination_is_root_relative() {
+        let pkg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(pkg.path().join("f"), b"x").unwrap();
+        let plan = DeployPlan {
+            map: vec![("f".into(), "/pub/f".into()), ("f".into(), "/../f".into())],
+            ..Default::default()
+        };
+        let stats = apply_deploy(&plan, pkg.path(), root.path()).unwrap();
+        assert!(root.path().join("pub/f").is_file());
+        assert_eq!(stats.files_copied, 1);
+        assert_eq!(stats.warnings.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chmod_outside_root_is_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = outer.path().join("victim");
+        std::fs::write(&victim, b"x").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let plan = DeployPlan {
+            chmod: vec![ChmodEntry {
+                mask: 0o777,
+                path: "../victim".into(),
+            }],
+            ..Default::default()
+        };
+        let stats = apply_deploy(&plan, outer.path(), &root).unwrap();
+        assert_eq!(stats.chmods_applied, 0);
+        assert_eq!(stats.warnings.len(), 1);
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[cfg(unix)]
