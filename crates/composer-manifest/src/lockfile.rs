@@ -1317,9 +1317,10 @@ mod tests {
 
     #[test]
     fn a_funding_entry_without_a_url_is_read() {
-        let f: Vec<LockFunding> =
-            serde_json::from_str(r#"[{"type": "custom"}, {"type": "github", "url": "https://github.com/sponsors/x"}]"#)
-                .unwrap();
+        let f: Vec<LockFunding> = serde_json::from_str(
+            r#"[{"type": "custom"}, {"type": "github", "url": "https://github.com/sponsors/x"}]"#,
+        )
+        .unwrap();
         assert_eq!(f[0].kind, "custom");
         assert_eq!(f[0].url, "");
         assert_eq!(f[1].url, "https://github.com/sponsors/x");
