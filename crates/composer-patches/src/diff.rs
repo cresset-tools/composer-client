@@ -11,7 +11,7 @@
 //! inference (Phase C), multi-file splitting, and per-file path routing.
 
 use eyre::{Result, eyre};
-use flickzeug::{Diff, ParserConfig, patch_from_str_with_config};
+use flickzeug::{Diff, ParserConfig, patch_from_bytes_with_config};
 
 /// One file's worth of a (possibly multi-file) patch.
 #[derive(Debug)]
@@ -25,7 +25,7 @@ pub struct FileDiff<'a> {
     /// The kind of change this file diff represents.
     pub kind: ChangeKind,
     /// The parsed, applyable diff (borrows the source patch text).
-    pub diff: Diff<'a, str>,
+    pub diff: Diff<'a, [u8]>,
 }
 
 /// What a single [`FileDiff`] does to its target file.
@@ -50,21 +50,25 @@ impl FileDiff<'_> {
     }
 }
 
-/// Parse raw patch text into its per-file diffs, preserving raw header paths.
-pub fn split(text: &str) -> Result<Vec<FileDiff<'_>>> {
+/// Parse a raw patch into its per-file diffs, preserving raw header paths.
+///
+/// Works on bytes, not text: a patch is usually UTF-8, but the files it
+/// patches (and so its context and changed lines) need not be — a vendor file
+/// in Latin-1 is patched byte for byte, as GNU `patch` would.
+pub fn split<T: AsRef<[u8]> + ?Sized>(patch: &T) -> Result<Vec<FileDiff<'_>>> {
     let config = ParserConfig {
         // We strip `a/`/`b/` ourselves via `-p`, so leave the tokens raw.
         strip_ab_prefix: false,
         ..ParserConfig::default()
     };
-    let diffs = patch_from_str_with_config(text, config)
+    let diffs = patch_from_bytes_with_config(patch.as_ref(), config)
         .map_err(|e| eyre!("failed to parse patch: {e}"))?;
 
     Ok(diffs
         .into_iter()
         .map(|diff| {
-            let old_path = diff.original().map(str::to_string);
-            let new_path = diff.modified().map(str::to_string);
+            let old_path = diff.original().map(path_string);
+            let new_path = diff.modified().map(path_string);
             let kind = match (&old_path, &new_path) {
                 (None, Some(_)) => ChangeKind::Create,
                 (Some(_), None) => ChangeKind::Delete,
@@ -87,6 +91,12 @@ pub fn split(text: &str) -> Result<Vec<FileDiff<'_>>> {
 /// path has `n` or fewer components (the level can't apply to this file).
 /// Leading `./` segments and empty components (from `//`) are skipped like
 /// GNU `patch` does, and do not count toward `n`.
+/// A header path as a string. Paths in patches are ASCII in practice; anything
+/// else is replaced rather than rejected, as the path only routes the file.
+fn path_string(path: &[u8]) -> String {
+    String::from_utf8_lossy(path).into_owned()
+}
+
 pub fn strip_components(path: &str, n: usize) -> Option<String> {
     let mut stripped = 0usize;
     let mut rest = path;
