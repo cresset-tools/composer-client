@@ -629,10 +629,45 @@ pub fn install_from_lock_with_patches(
 
     // Native `magento/magento-composer-installer`: for every freshly-extracted
     // Magento 2 component, copy its `extra.map` files into the project root and
-    // apply `extra.chmod`. Driving this off `install_set` (only changed/new
-    // packages) matches Composer. A deploy failure is a warning, not an abort.
-    let deploy_summary = deploy_components(&install_set, &vendor_dirs, project_root);
+    // apply `extra.chmod`, overwriting what is there, as Composer does for the
+    // packages it installs. A deploy failure is a warning, not an abort.
+    let deploy_summary = deploy_components(
+        &install_set,
+        &vendor_dirs,
+        project_root,
+        DeployMode::Overwrite,
+    );
     warnings.extend(deploy_summary.warnings);
+
+    // Then put back whatever is missing from the Magento packages that were
+    // already installed. Composer leaves those alone, so a deleted `index.php`
+    // or `bin/magento` (untracked, so `git clean` removes it) stays gone until
+    // magento2-base itself changes. Only missing files are placed, so hand
+    // edits to files like `pub/.htaccess` survive.
+    let installed_now: HashSet<&str> = install_set.iter().map(|p| p.name.as_str()).collect();
+    let already_installed: Vec<&LockPackage> = installable
+        .iter()
+        .copied()
+        .filter(|p| !installed_now.contains(p.name.as_str()))
+        .filter(|p| composer_installers::deploy::is_magento2_type(p.package_type.as_deref()))
+        .collect();
+    let already_installed_dirs: Vec<PathBuf> = already_installed
+        .iter()
+        .map(|p| {
+            project_root.join(composer_installers::install_path(
+                &p.name,
+                p.package_type.as_deref(),
+                &installer_paths,
+            ))
+        })
+        .collect();
+    let restore_summary = deploy_components(
+        &already_installed,
+        &already_installed_dirs,
+        project_root,
+        DeployMode::RestoreMissing,
+    );
+    warnings.extend(restore_summary.warnings);
 
     // `pre-autoload-dump` — before the autoloader is regenerated.
     if let Some(hooks) = hooks {
@@ -753,7 +788,7 @@ pub fn install_from_lock_with_patches(
         plugin_hooks_skipped,
         packages_removed,
         bins_installed: bin_summary.bins_installed,
-        files_deployed: deploy_summary.files_deployed,
+        files_deployed: deploy_summary.files_deployed + restore_summary.files_deployed,
         no_dev: opts.no_dev,
         download_bytes,
         autoload_ms,
@@ -974,22 +1009,33 @@ struct DeploySummary {
     warnings: Vec<String>,
 }
 
-/// Run the native `magento/magento-composer-installer` deploy over the
-/// freshly-extracted packages. `install_set[i]` was extracted to
-/// `vendor_dirs[i]`, so the two slices are zipped. For each Magento 2 component
-/// we copy its `extra.map` into `project_root` and apply `extra.chmod`; if any
-/// `magento2-component` was deployed we emit `app/etc/vendor_path.php`. Deploy
-/// failures become warnings.
+/// How [`deploy_components`] treats root files that already exist.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeployMode {
+    /// Freshly-extracted packages: overwrite, as Composer does.
+    Overwrite,
+    /// Packages that were already installed: place only missing files.
+    RestoreMissing,
+}
+
+/// Run the native `magento/magento-composer-installer` deploy over
+/// `packages`. `packages[i]` lives in `vendor_dirs[i]`, so the two slices are
+/// zipped. For each Magento 2 component we copy its `extra.map` into
+/// `project_root` (overwriting, or only what is missing, per `mode`) and
+/// apply `extra.chmod`; when a `magento2-component` is among them we emit
+/// `app/etc/vendor_path.php` (in [`DeployMode::RestoreMissing`], only if it
+/// is missing). Deploy failures become warnings.
 fn deploy_components(
-    install_set: &[&LockPackage],
+    packages: &[&LockPackage],
     vendor_dirs: &[PathBuf],
     project_root: &Path,
+    mode: DeployMode,
 ) -> DeploySummary {
     let mut files_deployed = 0u64;
     let mut warnings = Vec::new();
     let mut deployed_component = false;
 
-    for (pkg, vendor_dir) in install_set.iter().zip(vendor_dirs.iter()) {
+    for (pkg, vendor_dir) in packages.iter().zip(vendor_dirs.iter()) {
         let Some(plan) = composer_installers::plan_deploy(pkg.package_type.as_deref(), &pkg.extra)
         else {
             continue;
@@ -997,7 +1043,20 @@ fn deploy_components(
         if plan.map.is_empty() && plan.chmod.is_empty() {
             continue;
         }
-        match composer_installers::apply_deploy(&plan, vendor_dir, project_root) {
+        // An already-installed package whose directory is gone has nothing
+        // to restore from; the diff reinstalls such packages anyway.
+        if mode == DeployMode::RestoreMissing && !vendor_dir.is_dir() {
+            continue;
+        }
+        let result = match mode {
+            DeployMode::Overwrite => {
+                composer_installers::apply_deploy(&plan, vendor_dir, project_root)
+            }
+            DeployMode::RestoreMissing => {
+                composer_installers::restore_deploy(&plan, vendor_dir, project_root)
+            }
+        };
+        match result {
             Ok(stats) => {
                 files_deployed += stats.files_copied;
                 deployed_component |= plan.is_component;
@@ -1017,7 +1076,10 @@ fn deploy_components(
     // `app/etc/vendor_path.php` is generated by the installer (it is not one of
     // magento2-base's mapped files); Magento's bootstrap reads it to locate
     // `vendor/`. Emit it once whenever a component laid down the root skeleton.
-    if deployed_component && let Err(e) = write_vendor_path_php(project_root) {
+    let write_vendor_path = deployed_component
+        && (mode == DeployMode::Overwrite
+            || !project_root.join("app/etc/vendor_path.php").exists());
+    if write_vendor_path && let Err(e) = write_vendor_path_php(project_root) {
         warnings.push(format!("writing app/etc/vendor_path.php failed: {e}"));
     }
 
