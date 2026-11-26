@@ -24,7 +24,9 @@ pub mod deploy;
 pub mod laravel;
 pub mod paths;
 
-pub use deploy::{ChmodEntry, DeployPlan, DeployStats, VENDOR_PATH_PHP, apply_deploy, plan_deploy};
+pub use deploy::{
+    ChmodEntry, DeployPlan, DeployStats, VENDOR_PATH_PHP, apply_deploy, plan_deploy, restore_deploy,
+};
 pub use laravel::{
     PACKAGES_CACHE, STALE_CACHES, blocking_post_autoload_dump, build_package_manifest,
     clear_compiled, only_reproduced_scripts, render_packages_php,

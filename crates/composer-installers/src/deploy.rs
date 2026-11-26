@@ -184,6 +184,40 @@ pub fn apply_deploy(
     package_dir: &Path,
     project_root: &Path,
 ) -> Result<DeployStats> {
+    deploy(plan, package_dir, project_root, Existing::Overwrite)
+}
+
+/// Like [`apply_deploy`], but only places mapped files whose destination is
+/// missing, leaving every existing file as it is; chmod masks are applied as
+/// usual.
+///
+/// This is for packages that are already installed. Composer leaves their
+/// root files alone, so a deleted `index.php` or `bin/magento` stays deleted
+/// until `magento/magento-base` itself changes (and `git clean` deletes them,
+/// since they are untracked). Restoring only what is missing brings those
+/// files back without overwriting root files people edit, such as
+/// `pub/.htaccess`.
+pub fn restore_deploy(
+    plan: &DeployPlan,
+    package_dir: &Path,
+    project_root: &Path,
+) -> Result<DeployStats> {
+    deploy(plan, package_dir, project_root, Existing::Keep)
+}
+
+/// What a deploy does with a destination file that already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    Overwrite,
+    Keep,
+}
+
+fn deploy(
+    plan: &DeployPlan,
+    package_dir: &Path,
+    project_root: &Path,
+    existing: Existing,
+) -> Result<DeployStats> {
     let mut stats = DeployStats::default();
 
     for (source, dest) in &plan.map {
@@ -227,11 +261,12 @@ pub fn apply_deploy(
                 stats.add(copy_path(
                     &package_dir.join(&matched),
                     &project_root.join(match_dst),
+                    existing,
                 )?);
             }
             continue;
         }
-        stats.add(copy_path(&src_path, &project_root.join(dst_rel))?);
+        stats.add(copy_path(&src_path, &project_root.join(dst_rel), existing)?);
     }
 
     for entry in &plan.chmod {
@@ -413,10 +448,11 @@ fn match_class(pat: &[u8], c: u8) -> Option<(bool, usize)> {
 }
 
 /// Copy a file or directory tree from `src` to `dst`, creating parent
-/// directories as needed and overwriting existing files. Mirrors the
+/// directories as needed. An existing file is replaced, or kept with
+/// [`Existing::Keep`]. Mirrors the
 /// copy deploy strategy's file-to-file and dir-to-dir paths, for a
 /// literal mapping or a single expanded glob match.
-fn copy_path(src: &Path, dst: &Path) -> Result<DeployStats> {
+fn copy_path(src: &Path, dst: &Path, existing: Existing) -> Result<DeployStats> {
     let meta = std::fs::symlink_metadata(src)
         .map_err(|e| eyre!("deploy source {} unreadable: {e}", src.display()))?;
 
@@ -425,10 +461,13 @@ fn copy_path(src: &Path, dst: &Path) -> Result<DeployStats> {
     }
 
     if meta.is_dir() {
-        copy_dir_recursive(src, dst)
+        copy_dir_recursive(src, dst, existing)
     } else {
         // Replace any existing destination (file or dangling symlink).
-        if dst.exists() || std::fs::symlink_metadata(dst).is_ok() {
+        if std::fs::symlink_metadata(dst).is_ok() {
+            if existing == Existing::Keep {
+                return Ok(DeployStats::default());
+            }
             let _ = std::fs::remove_file(dst);
         }
         std::fs::copy(src, dst)
@@ -441,8 +480,9 @@ fn copy_path(src: &Path, dst: &Path) -> Result<DeployStats> {
 }
 
 /// Recursively copy a directory tree, counting files copied. Directories
-/// are created if absent; files are overwritten.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<DeployStats> {
+/// are created if absent; existing files are overwritten or kept, per
+/// `existing`.
+fn copy_dir_recursive(src: &Path, dst: &Path, existing: Existing) -> Result<DeployStats> {
     let mut stats = DeployStats::default();
     std::fs::create_dir_all(dst).map_err(|e| eyre!("creating {}: {e}", dst.display()))?;
 
@@ -452,9 +492,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<DeployStats> {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if file_type.is_dir() {
-            stats.add(copy_dir_recursive(&from, &to)?);
+            stats.add(copy_dir_recursive(&from, &to, existing)?);
         } else {
-            if to.exists() || std::fs::symlink_metadata(&to).is_ok() {
+            if std::fs::symlink_metadata(&to).is_ok() {
+                if existing == Existing::Keep {
+                    continue;
+                }
                 let _ = std::fs::remove_file(&to);
             }
             std::fs::copy(&from, &to)
@@ -607,6 +650,53 @@ mod tests {
         assert!(!dest.join(".github").exists());
         assert_eq!(stats.files_copied, 3);
         assert!(stats.warnings.is_empty());
+    }
+
+    #[test]
+    fn restore_places_missing_files_and_keeps_existing_ones() {
+        let pkg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(pkg.path().join("index.php"), b"pristine").unwrap();
+        std::fs::create_dir_all(pkg.path().join("pub")).unwrap();
+        std::fs::write(pkg.path().join("pub/index.php"), b"pristine").unwrap();
+        std::fs::write(pkg.path().join("pub/.htaccess"), b"pristine").unwrap();
+        std::fs::create_dir_all(pkg.path().join("bin")).unwrap();
+        std::fs::write(pkg.path().join("bin/magento"), b"#!php").unwrap();
+        // pub/.htaccess was edited by hand; the rest was deleted.
+        std::fs::create_dir_all(root.path().join("pub")).unwrap();
+        std::fs::write(root.path().join("pub/.htaccess"), b"edited").unwrap();
+
+        let plan = DeployPlan {
+            map: vec![
+                ("index.php".into(), "index.php".into()),
+                ("pub".into(), "pub".into()),
+                ("bin/magento".into(), "bin/magento".into()),
+            ],
+            chmod: vec![ChmodEntry {
+                mask: 0o755,
+                path: "bin/magento".into(),
+            }],
+            is_component: true,
+        };
+        let stats = restore_deploy(&plan, pkg.path(), root.path()).unwrap();
+
+        assert_eq!(stats.files_copied, 3);
+        let read = |p: &str| std::fs::read(root.path().join(p)).unwrap();
+        assert_eq!(read("index.php"), b"pristine");
+        assert_eq!(read("pub/index.php"), b"pristine");
+        assert_eq!(read("pub/.htaccess"), b"edited");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(root.path().join("bin/magento"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+
+        let again = restore_deploy(&plan, pkg.path(), root.path()).unwrap();
+        assert_eq!(again.files_copied, 0);
     }
 
     /// `dir/* => dest` and `dir/* => dest/` are the same: matches land in
