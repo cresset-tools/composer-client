@@ -1,21 +1,5 @@
 # Changelog
 
-## [0.6.2](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.6.1...composer-install-v0.6.2) (2026-11-27)
-
-
-### Bug Fixes
-
-* **composer-install:** put back missing Magento root files on every install ([44f3bb4](https://github.com/cresset-tools/composer-client/commit/44f3bb47b92548b567b6f307148929fdc61fd9b3))
-
-
-### Dependencies
-
-* The following workspace dependencies were updated
-  * dependencies
-    * composer-installers bumped from 0.2.0 to 0.3.0
-    * composer-autoload bumped from 0.1.1 to 0.1.2
-    * composer-patches bumped from 0.2.1 to 0.2.2
-
 ## [0.6.1](https://github.com/cresset-tools/composer-client/compare/composer-install-v0.6.0...composer-install-v0.6.1) (2026-11-19)
 
 

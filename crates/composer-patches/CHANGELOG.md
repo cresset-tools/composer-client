@@ -1,19 +1,5 @@
 # Changelog
 
-## [0.2.2](https://github.com/cresset-tools/composer-client/compare/composer-patches-v0.2.1...composer-patches-v0.2.2) (2026-11-27)
-
-
-### Bug Fixes
-
-* **composer-patches:** patch files that are not UTF-8 ([#39](https://github.com/cresset-tools/composer-client/issues/39)) ([bead506](https://github.com/cresset-tools/composer-client/commit/bead5066e494fc98eb293fc66b019e8c07d45d9b))
-
-
-### Dependencies
-
-* The following workspace dependencies were updated
-  * dependencies
-    * composer-installers bumped from 0.2.0 to 0.3.0
-
 ## [0.2.1](https://github.com/cresset-tools/composer-client/compare/composer-patches-v0.2.0...composer-patches-v0.2.1) (2026-11-19)
 
 
