@@ -1,6 +1,6 @@
 [package]
 name = "composer-install"
-version = "0.6.1"
+version = "0.6.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,9 +20,9 @@ exclude = ["/tests"]
 # release-please's cargo-workspace plugin bumps each pin when the dependency
 # is released. Mirrors how composer-autoload depends on composer-installers.
 composer-manifest = { path = "../composer-manifest", version = "0.2.1" }
-composer-installers = { path = "../composer-installers", version = "0.2.0" }
-composer-autoload = { path = "../composer-autoload", version = "0.1.1" }
-composer-patches = { path = "../composer-patches", version = "0.2.1" }
+composer-installers = { path = "../composer-installers", version = "0.3.0" }
+composer-autoload = { path = "../composer-autoload", version = "0.1.2" }
+composer-patches = { path = "../composer-patches", version = "0.2.2" }
 
 composer-auth = { workspace = true }
 eyre = { workspace = true }

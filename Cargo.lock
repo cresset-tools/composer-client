@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "composer-autoload"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "composer-installers",
  "composer-php-json",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "composer-install"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "composer-auth",
  "composer-autoload",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "composer-installers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eyre",
  "serde_json",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "composer-patches"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "composer-installers",
  "eyre",
