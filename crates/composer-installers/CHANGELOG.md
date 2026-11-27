@@ -1,12 +1,5 @@
 # Changelog
 
-## [0.3.0](https://github.com/cresset-tools/composer-client/compare/composer-installers-v0.2.0...composer-installers-v0.3.0) (2026-11-27)
-
-
-### Features
-
-* **composer-installers:** restore_deploy, which places only missing mapped files ([c3516a4](https://github.com/cresset-tools/composer-client/commit/c3516a4bf63038565caea25e21d580829d141bc4))
-
 ## [0.2.0](https://github.com/cresset-tools/composer-client/compare/composer-installers-v0.1.0...composer-installers-v0.2.0) (2026-11-19)
 
 

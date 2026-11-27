@@ -1,7 +1,7 @@
 {
-  "crates/composer-installers": "0.3.0",
-  "crates/composer-autoload": "0.1.2",
-  "crates/composer-patches": "0.2.2",
+  "crates/composer-installers": "0.2.0",
+  "crates/composer-autoload": "0.1.1",
+  "crates/composer-patches": "0.2.1",
   "crates/composer-manifest": "0.2.1",
-  "crates/composer-install": "0.6.2"
+  "crates/composer-install": "0.6.1"
 }

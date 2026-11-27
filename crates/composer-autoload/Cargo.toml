@@ -1,6 +1,6 @@
 [package]
 name = "composer-autoload"
-version = "0.1.2"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -21,7 +21,7 @@ exclude = ["/tests"]
 [dependencies]
 # Inter-crate dep declared directly (not workspace-inherited) so release-please's
 # cargo-workspace plugin bumps this pin when composer-installers is released.
-composer-installers = { path = "../composer-installers", version = "0.3.0" }
+composer-installers = { path = "../composer-installers", version = "0.2.0" }
 composer-php-json = { workspace = true }
 composer-semver = { workspace = true }
 md-5 = { workspace = true }
